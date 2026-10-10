@@ -3,7 +3,8 @@
 -- ce-mcp bridge: lets ce_mcp.py (an MCP server) drive Cheat Engine without the GUI.
 --
 -- ce_mcp.py keeps a private CE copy in ce-mcp\ce, syncs this file into its autorun folder and starts it
--- hidden and non-elevated (CE_MCP_PARENT = the server's PID); CE then closes when the server exits.
+-- hidden and non-elevated (CE_MCP_PARENT = the server's PID); CE then closes when the server exits, which it
+-- notices when it can delete CE_MCP_ALIVE, a file the server holds open (unlike a PID, it is never reused).
 -- The transport is a file mailbox in %LOCALAPPDATA%\ce-mcp, so an elevated CE (run by hand) still works:
 -- the client writes `req`, a timer here answers in `resp`.
 -- Every request line is `key=<hex of the value bytes>`; the reply is `id=N v=VERSION`, `ok`/`err`, then text.
@@ -13,6 +14,7 @@
 
 local VERSION = 3  -- must match BRIDGE_VERSION in ce_mcp.py
 local PARENT = tonumber(os.getenv('CE_MCP_PARENT') or '')  -- set when ce-mcp started this CE
+local ALIVE = os.getenv('CE_MCP_ALIVE')
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
 -- a CE started by ce-mcp serves that server's own mailbox; one started by hand serves the shared one
 local BOX = os.getenv('CE_MCP_MAILBOX') or DIR
@@ -59,11 +61,14 @@ end
 local function status_text()
   local pid = getOpenedProcessID()
   if pid == 0 then return 'not attached' end
-  local bpn = 0
-  for _ in pairs(bps) do bpn = bpn + 1 end
-  return string.format('pid %d %s%s, debugger %s, %d breakpoint(s)', pid, proc_name(pid),
+  local on, stopped = 0, 0
+  for _, rec in pairs(bps) do
+    if rec.stopped then stopped = stopped + 1 else on = on + 1 end
+  end
+  return string.format('pid %d %s%s, debugger %s, %d breakpoint(s)%s', pid, proc_name(pid),
     targetIs64Bit() and ' (64-bit)' or ' (32-bit)',
-    debug_isDebugging() and ('on, interface ' .. tostring(debug_getCurrentDebuggerInterface())) or 'off', bpn)
+    debug_isDebugging() and ('on, interface ' .. tostring(debug_getCurrentDebuggerInterface())) or 'off', on,
+    stopped > 0 and string.format(' (+%d stopped at max_hits)', stopped) or '')
 end
 
 function cmd.status() return status_text() end
@@ -466,7 +471,7 @@ if PARENT then
   local watchdog = createTimer(nil, true)
   watchdog.Interval = 3000
   watchdog.OnTimer = function()
-    if (getProcesslist() or {})[PARENT] then return end
+    if ALIVE and fileExists(ALIVE) and not os.remove(ALIVE) then return end
     watchdog.Enabled = false
     pcall(cmd.bp_clear, {})
     closeCE()

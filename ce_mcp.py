@@ -86,18 +86,20 @@ class _Proc:
         _k32.WaitForSingleObject(self._h, 5000)
 
 
+def _alive(pid):
+    h = _k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    code = wt.DWORD()
+    alive = bool(_k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259
+    _k32.CloseHandle(h)
+    return alive
+
+
 def _prune_mailboxes():
     """Remove the mailboxes of servers that are no longer running."""
     for name in os.listdir(ROOT) if os.path.isdir(ROOT) else []:
-        if not name.isdigit() or int(name) == os.getpid():
-            continue
-        h = _k32.OpenProcess(0x1000, False, int(name))  # PROCESS_QUERY_LIMITED_INFORMATION
-        alive = False
-        if h:
-            code = wt.DWORD()
-            alive = bool(_k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259
-            _k32.CloseHandle(h)
-        if not alive:
+        if name.isdigit() and int(name) != os.getpid() and not _alive(int(name)):
             shutil.rmtree(os.path.join(ROOT, name), ignore_errors=True)
 
 
@@ -108,7 +110,12 @@ def launch_ce():
         provision_ce()
     shutil.copyfile(BRIDGE, os.path.join(CE_DIR, 'autorun', 'ce_mcp_bridge.lua'))
     _prune_mailboxes()
-    env = dict(os.environ, __COMPAT_LAYER='RunAsInvoker', CE_MCP_PARENT=str(os.getpid()), CE_MCP_MAILBOX=DIR)
+    if not _ce.get('alive'):
+        # held open (so undeletable) for the server's lifetime: the bridge closes CE once it can delete it,
+        # which unlike the server's PID cannot be reused by another process
+        _ce['alive'] = open(os.path.join(DIR, f'alive-{next(_seq)}'), 'w')
+    env = dict(os.environ, __COMPAT_LAYER='RunAsInvoker', CE_MCP_PARENT=str(os.getpid()), CE_MCP_MAILBOX=DIR,
+               CE_MCP_ALIVE=_ce['alive'].name)
     block = ''.join(f'{k}={v}\0' for k, v in sorted(env.items())) + '\0'
     if not _ce.get('desktop'):  # the handle stays open for the server's lifetime
         _ce['desktop'] = _u32.CreateDesktopW(DESKTOP, None, None, 0, 0x10000000, None)  # GENERIC_ALL
@@ -202,7 +209,13 @@ def _call(cmd, timeout, kw, patience=10.0, launch=True):
             if stuck:
                 _remove(REQ)
                 raise RuntimeError(stuck)
+        elif not SHARED and _ce['proc'] and _ce['proc'].poll() is not None and not os.path.exists(RESP):
+            code = _ce['proc'].poll()
+            _ce['proc'] = None
+            raise RuntimeError(f'Cheat Engine exited (code {code:#x}) while handling {cmd}; '
+                               'the next call starts a new one (attach again)')
         if waited > timeout:
+            _remove(REQ)
             raise RuntimeError(f'{cmd} timed out after {timeout:.0f}s')
         time.sleep(0.01)
 

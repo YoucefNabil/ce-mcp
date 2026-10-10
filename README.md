@@ -26,7 +26,7 @@ use the shared mailbox of the hand-started CE instead, and never start a CE of t
 Requests are answered one at a time. The bridge tags each reply with its protocol version, and the server refuses a
 bridge that does not match (a hand-started CE with an old copy of the bridge). If the launched CE stops answering,
 for example because a dialog opened on its hidden desktop, calls fail with a message saying so and `restart()`
-replaces it.
+replaces it. If it exits mid-request, that call fails at once and the next one starts a new CE.
 
 ## Install
 

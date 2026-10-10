@@ -63,6 +63,20 @@ def offline():
         c._ce['proc'] = Running()
         check('running CE that never answers', lambda: c._call('status', 30, {}, patience=1),
               lambda o: 'running but not answering' in o)
+
+        class DiesOnRequest:
+            pid = 4242
+            def poll(self): return None if os.path.exists(c.REQ) else 0xC0000005
+        def take():
+            while not os.path.exists(c.REQ):
+                time.sleep(0.005)
+            time.sleep(0.2)
+            os.remove(c.REQ)
+        c._ce['proc'] = DiesOnRequest()
+        threading.Thread(target=take, daemon=True).start()
+        t0 = time.time()
+        check('CE dying mid-request fails fast', lambda: c.call('status'),
+              lambda o: 'exited (code 0xc0000005)' in o and time.time() - t0 < 5 and c._ce['proc'] is None)
         c._ce['proc'], c.SHARED = None, True
         check('shared mode never launches CE', lambda: c.call('status'),
               lambda o: 'started by hand' in o and c._ce['proc'] is None)
@@ -160,6 +174,7 @@ def online():
               lambda o: ' 2 hit(s)' in o and 'stopped at max_hits' in o)
         check('stopped bp frees its slot', lambda: [c.bp_set(hex(base + 8 + 8 * i)) for i in range(4)][-1],
               lambda o: 'breakpoint on' in o)
+        check('status counts the stopped bp apart', c.status, lambda o: '4 breakpoint(s) (+1 stopped' in o)
         check('bp_clear (stopped one included)', c.bp_clear, lambda o: 'removed 5' in o)
 
         for i in range(4):
@@ -195,6 +210,14 @@ def two_servers():
     outs = [k.communicate(timeout=120)[0].strip() for k in kids]
     check('two servers at once', lambda: ' / '.join(outs), lambda o: o.count('40/40') == 2)
 
+    def closed():
+        ces = [int(o.split('ce=')[1]) for o in outs if 'ce=' in o]
+        end = time.time() + 10  # the watchdog checks every 3s
+        while time.time() < end and any(map(c._alive, ces)):
+            time.sleep(0.2)
+        return f'{len(ces)} CE(s), {sum(map(c._alive, ces))} still running'
+    check('each CE closes after its server exits', closed, lambda o: o == '2 CE(s), 0 still running')
+
 
 def child(tag):
     t = subprocess.Popen([sys.executable, '-u', '-c', f'import ctypes, time\nv = ctypes.c_uint32({tag})\n'
@@ -203,7 +226,7 @@ def child(tag):
     try:
         c.attach(str(t.pid))
         good = sum(c.read(a).split()[0] == str(tag) for _ in range(40))
-        print(f'{good}/40')
+        print(f'{good}/40 ce={c._ce["proc"].pid}')
     finally:
         t.kill()
 

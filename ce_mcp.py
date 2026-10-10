@@ -2,14 +2,15 @@
 # Copyright (C) 2026 Youcef Nabil
 """ce-mcp: MCP server that drives Cheat Engine through ce_mcp_bridge.lua.
 
-When the bridge does not answer, the server starts its private CE copy (ce\\) hidden and non-elevated,
-with the bridge synced into its autorun folder; that CE closes when this server exits. The copy is made
+When the bridge does not answer, the server starts its private CE copy (ce\\) non-elevated on a desktop
+of its own, so nothing shows on screen, with the bridge synced into its autorun folder; that CE closes
+when this server exits. The copy is made
 on first use from an installed Cheat Engine (or CE_MCP_SOURCE, a CE folder). Requests go
 through a file mailbox in %LOCALAPPDATA%\\ce-mcp that the bridge polls. Addresses are anything Cheat
 Engine resolves: hex (0x optional), "Game.exe+1234", symbols, or pointer expressions like
 "[[Game.exe+10]+8]". Values are little-endian. Output is kept short on purpose.
 """
-import glob, os, re, shutil, struct, subprocess, time
+import ctypes, ctypes.wintypes as wt, glob, os, re, shutil, struct, time
 from mcp.server.fastmcp import FastMCP
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,18 +37,64 @@ def provision_ce():
     shutil.copytree(src, CE_DIR, ignore=shutil.ignore_patterns('unins*'), dirs_exist_ok=True)
 
 
+class _SI(ctypes.Structure):
+    _fields_ = [('cb', wt.DWORD), ('lpReserved', wt.LPWSTR), ('lpDesktop', wt.LPWSTR), ('lpTitle', wt.LPWSTR),
+                ('dwX', wt.DWORD), ('dwY', wt.DWORD), ('dwXSize', wt.DWORD), ('dwYSize', wt.DWORD),
+                ('dwXCountChars', wt.DWORD), ('dwYCountChars', wt.DWORD), ('dwFillAttribute', wt.DWORD),
+                ('dwFlags', wt.DWORD), ('wShowWindow', wt.WORD), ('cbReserved2', wt.WORD),
+                ('lpReserved2', ctypes.c_void_p), ('hStdInput', wt.HANDLE), ('hStdOutput', wt.HANDLE),
+                ('hStdError', wt.HANDLE)]
+
+
+class _PI(ctypes.Structure):
+    _fields_ = [('hProcess', wt.HANDLE), ('hThread', wt.HANDLE), ('dwProcessId', wt.DWORD), ('dwThreadId', wt.DWORD)]
+
+
+_k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+_u32 = ctypes.WinDLL('user32', use_last_error=True)
+_u32.CreateDesktopW.restype = wt.HANDLE
+_u32.CreateDesktopW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.c_void_p]
+_k32.CreateProcessW.argtypes = [wt.LPCWSTR, wt.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wt.BOOL, wt.DWORD,
+                                ctypes.c_void_p, wt.LPCWSTR, ctypes.POINTER(_SI), ctypes.POINTER(_PI)]
+_k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+DESKTOP = 'ce-mcp'
+
+
+class _Proc:
+    """The launched CE: just enough of Popen (pid, poll) for the server."""
+    def __init__(self, pi):
+        self.pid, self._h = pi.dwProcessId, pi.hProcess
+        _k32.CloseHandle(pi.hThread)
+
+    def poll(self):
+        code = wt.DWORD()
+        _k32.GetExitCodeProcess(self._h, ctypes.byref(code))
+        return None if code.value == 259 else code.value  # STILL_ACTIVE
+
+
 def launch_ce():
-    """Start the private CE copy hidden, without UAC (RunAsInvoker), tied to this server's lifetime."""
+    """Start the private CE copy without UAC (RunAsInvoker), tied to this server's lifetime, on a desktop of
+    its own so its splash and windows never appear on screen (CE_MCP_VISIBLE=1: normal desktop, minimized)."""
     if _ce['proc'] and _ce['proc'].poll() is None:
         return
     if not os.path.exists(CE_EXE):
         provision_ce()
     shutil.copyfile(BRIDGE, os.path.join(CE_DIR, 'autorun', 'ce_mcp_bridge.lua'))
     env = dict(os.environ, __COMPAT_LAYER='RunAsInvoker', CE_MCP_PARENT=str(os.getpid()))
-    si = subprocess.STARTUPINFO()
-    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    si.wShowWindow = 7  # SW_SHOWMINNOACTIVE: don't take focus from the game
-    _ce['proc'] = subprocess.Popen([CE_EXE], cwd=os.path.dirname(CE_EXE), env=env, startupinfo=si)
+    block = ''.join(f'{k}={v}\0' for k, v in sorted(env.items())) + '\0'
+    si = _SI(cb=ctypes.sizeof(_SI), dwFlags=1, wShowWindow=7)  # STARTF_USESHOWWINDOW, SW_SHOWMINNOACTIVE
+    if os.environ.get('CE_MCP_VISIBLE') != '1':
+        if not _ce.get('desktop'):  # the handle stays open for the server's lifetime
+            _ce['desktop'] = _u32.CreateDesktopW(DESKTOP, None, None, 0, 0x10000000, None)  # GENERIC_ALL
+            if not _ce['desktop']:
+                raise RuntimeError(f'CreateDesktop failed (error {ctypes.get_last_error()})')
+        si.lpDesktop = DESKTOP
+    pi = _PI()
+    cmdline = ctypes.create_unicode_buffer(f'"{CE_EXE}"')
+    if not _k32.CreateProcessW(CE_EXE, cmdline, None, None, False, 0x400,  # CREATE_UNICODE_ENVIRONMENT
+                               ctypes.create_unicode_buffer(block), CE_DIR, ctypes.byref(si), ctypes.byref(pi)):
+        raise RuntimeError(f'starting Cheat Engine failed (error {ctypes.get_last_error()})')
+    _ce['proc'] = _Proc(pi)
 
 
 def call(cmd, timeout=120.0, **kw):
@@ -306,8 +353,12 @@ def aa(name: str, script: str = '', enable: bool = True) -> str:
 
 @mcp.tool()
 def window(show: bool = True) -> str:
-    """Show or hide the Cheat Engine window (it starts hidden when the server launched it)."""
-    return call('window', show=show)
+    """Show or hide the Cheat Engine window. The CE that ce-mcp starts lives on its own invisible desktop,
+    so this only matters with CE_MCP_VISIBLE=1 or a CE started by hand."""
+    out = call('window', show=show)
+    if os.environ.get('CE_MCP_VISIBLE') != '1' and _ce['proc']:
+        out += ' (on the hidden ce-mcp desktop: set CE_MCP_VISIBLE=1 for the server to see it)'
+    return out
 
 
 if __name__ == '__main__':

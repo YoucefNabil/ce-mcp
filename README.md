@@ -8,10 +8,13 @@ address"), disassemble and test auto assembler patches with short tool calls. CE
 
 `ce/` is a private copy of Cheat Engine, made on first use from an installed Cheat Engine (`Program Files\Cheat
 Engine*`, or the folder in `CE_MCP_SOURCE`); it is not part of this repo. When a tool call finds no bridge answering,
-the server copies `ce_mcp_bridge.lua` into `ce/autorun/` and starts `ce/cheatengine-x86_64.exe` **minimized, hidden
-and non-elevated** (`__COMPAT_LAYER=RunAsInvoker`, so no UAC prompt), with `CE_MCP_PARENT` set to its own PID. The
-bridge enables itself, hides CE's windows and closes CE (after removing its breakpoints) when the server process is
-gone. Nothing to start by hand; `window(show=True)` brings the GUI up if you want to watch.
+the server copies `ce_mcp_bridge.lua` into `ce/autorun/` and starts `ce/cheatengine-x86_64.exe` **non-elevated**
+(`__COMPAT_LAYER=RunAsInvoker`, so no UAC prompt) on a **Windows desktop of its own** (`CreateDesktop`), so its splash
+screen and windows never appear on yours, with `CE_MCP_PARENT` set to its own PID. The bridge enables itself and
+closes CE (after removing its breakpoints) when the server process is gone. Nothing to start by hand.
+
+To watch CE work, set `CE_MCP_VISIBLE=1` in the server's environment: CE then starts minimized on your desktop
+(its splash shows briefly) and `window(show=True)` brings it up.
 
 Requests go through a file mailbox in `%LOCALAPPDATA%\ce-mcp` (`req` / `resp`, written via rename), which also works
 with an elevated CE started by hand (an elevated process's named pipe would be read-only for the server). For that

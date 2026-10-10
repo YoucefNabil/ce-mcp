@@ -2,7 +2,7 @@
 
 An [MCP](https://modelcontextprotocol.io) server that drives a running **Cheat Engine 7.5** through a small Lua bridge,
 so an assistant such as Claude Code can scan memory, set logging hardware breakpoints ("find out what writes this
-address"), disassemble and test auto assembler patches with short tool calls. CE stays usable as normal.
+address"), disassemble and test auto assembler patches with short tool calls.
 
 ## How it works
 
@@ -23,7 +23,12 @@ case copy the bridge into that CE's `autorun` folder; it polls only if `%LOCALAP
 
 Each server has its own mailbox (`%LOCALAPPDATA%\ce-mcp\<server pid>`) and its own CE, so several sessions can run
 at once; mailboxes of servers that are gone are removed at the next launch. With the `enabled` file present, servers
-use the shared mailbox of the hand-started CE instead.
+use the shared mailbox of the hand-started CE instead, and never start a CE of their own.
+
+Requests are answered one at a time. The bridge tags each reply with its protocol version, and the server refuses a
+bridge that does not match (a hand-started CE with an old copy of the bridge). If the launched CE stops answering,
+for example because a dialog opened on its hidden desktop, calls fail with a message saying so and `restart()`
+replaces it.
 
 ## Install
 
@@ -53,14 +58,20 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 | `bp_set(addr, kind, size)` / `bp_hits` / `bp_clear` | Logging hardware breakpoints (write / access / execute, max 4). Hits grouped by instruction with registers of first and last hit and the value after a write. |
 | `find_writers(addr, seconds)` | bp_set + wait + report + clear: CE's "find out what writes this address". |
 | `disasm(addr, count, before)` | Disassembly with `module+offset` names. |
-| `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. |
+| `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. Enabling again without a script reuses the last one. Patches stay in the target when CE closes. |
+| `restart()` | Replace a launched CE that stopped answering (its breakpoints are removed first if it still can). |
 | `window(show)` | Show or hide the CE window. |
 
 ## Safety
 
-The launched CE has the same rights as the server. If you run an elevated CE with the bridge enabled, any process of
-your user can drive it through the mailbox with admin rights on the attached process; for that case `{$lua}` /
-`luaCall` in auto assembler scripts is refused, since it would run Lua in elevated CE.
+The launched CE runs non-elevated with the same rights as the server, so the mailbox gives no process more than it
+already has.
+
+An **elevated** CE started by hand with the bridge enabled is different: any process of your user can then drive it
+through the mailbox, with admin rights on whatever process it has attached. That is effectively admin access. The
+bridge refuses `{$lua}` / `luaCall` in auto assembler scripts, so that Lua does not run inside elevated CE, but plain
+auto assembler (`loadlibrary`, `createthread`, code writes) can still run code in an elevated target. Only enable
+the bridge in an elevated CE while you use it.
 
 ## License
 

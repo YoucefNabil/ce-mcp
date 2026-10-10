@@ -4,13 +4,12 @@
 
 When the bridge does not answer, the server starts its private CE copy (ce\\) non-elevated on a desktop
 of its own, so nothing shows on screen, with the bridge synced into its autorun folder; that CE closes
-when this server exits. The copy is made
-on first use from an installed Cheat Engine (or CE_MCP_SOURCE, a CE folder). Requests go
-through a file mailbox in %LOCALAPPDATA%\\ce-mcp that the bridge polls. Addresses are anything Cheat
-Engine resolves: hex (0x optional), "Game.exe+1234", symbols, or pointer expressions like
-"[[Game.exe+10]+8]". Values are little-endian. Output is kept short on purpose.
+when this server exits. The copy is made on first use from an installed Cheat Engine (or CE_MCP_SOURCE,
+a CE folder). Requests go through a file mailbox in %LOCALAPPDATA%\\ce-mcp that the bridge polls.
+Addresses are anything Cheat Engine resolves: hex (0x optional), "Game.exe+1234", symbols, or pointer
+expressions like "[[Game.exe+10]+8]". Values are little-endian. Output is kept short on purpose.
 """
-import ctypes, ctypes.wintypes as wt, glob, os, re, shutil, struct, time
+import ctypes, ctypes.wintypes as wt, glob, itertools, os, re, shutil, struct, threading, time
 from mcp.server.fastmcp import FastMCP
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,11 +19,14 @@ BRIDGE = os.path.join(HERE, 'ce_mcp_bridge.lua')
 ROOT = os.path.join(os.environ['LOCALAPPDATA'], 'ce-mcp')
 # Each server gets its own mailbox and CE, so concurrent sessions never take each other's requests.
 # With ROOT\enabled present, a CE started by hand serves the shared ROOT mailbox instead.
-DIR = ROOT if os.path.exists(os.path.join(ROOT, 'enabled')) else os.path.join(ROOT, str(os.getpid()))
+SHARED = os.path.exists(os.path.join(ROOT, 'enabled'))
+DIR = ROOT if SHARED else os.path.join(ROOT, str(os.getpid()))
 REQ, RESP = os.path.join(DIR, 'req'), os.path.join(DIR, 'resp')
+BRIDGE_VERSION = 2  # must match VERSION in ce_mcp_bridge.lua
 FMT = {'u8': '<B', 's8': '<b', 'u16': '<H', 's16': '<h', 'u32': '<I', 's32': '<i',
        'u64': '<Q', 's64': '<q', 'f32': '<f', 'f64': '<d', 'ptr': '<Q'}
-_seq = [int(time.time() * 1000) % 1_000_000_000]
+_seq = itertools.count(int(time.time() * 1000) % 1_000_000_000)
+_lock = threading.Lock()  # one request at a time: the mailbox holds a single req/resp pair
 _ce = {'proc': None}
 
 
@@ -63,6 +65,8 @@ _k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
 _k32.OpenProcess.restype = wt.HANDLE
 _k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 _k32.CloseHandle.argtypes = [wt.HANDLE]
+_k32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+_k32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
 DESKTOP = 'ce-mcp'
 
 
@@ -76,6 +80,10 @@ class _Proc:
         code = wt.DWORD()
         _k32.GetExitCodeProcess(self._h, ctypes.byref(code))
         return None if code.value == 259 else code.value  # STILL_ACTIVE
+
+    def kill(self):
+        _k32.TerminateProcess(self._h, 1)
+        _k32.WaitForSingleObject(self._h, 5000)
 
 
 def _prune_mailboxes():
@@ -96,8 +104,6 @@ def _prune_mailboxes():
 def launch_ce():
     """Start the private CE copy without UAC (RunAsInvoker), tied to this server's lifetime, on a desktop of
     its own so its splash and windows never appear on screen (CE_MCP_VISIBLE=1: normal desktop, minimized)."""
-    if _ce['proc'] and _ce['proc'].poll() is None:
-        return
     if not os.path.exists(CE_EXE):
         provision_ce()
     shutil.copyfile(BRIDGE, os.path.join(CE_DIR, 'autorun', 'ce_mcp_bridge.lua'))
@@ -119,27 +125,44 @@ def launch_ce():
     _ce['proc'] = _Proc(pi)
 
 
+def _remove(p):
+    try:
+        os.remove(p)
+    except FileNotFoundError:
+        pass
+
+
+def _running():
+    return bool(_ce['proc']) and _ce['proc'].poll() is None
+
+
 def call(cmd, timeout=120.0, **kw):
     """Send one request to the bridge and return its text, raising on an error reply."""
+    with _lock:
+        return _call(cmd, timeout, kw)
+
+
+def _call(cmd, timeout, kw, patience=10.0, launch=True):
+    """`patience`: seconds a running CE gets to take the request before it counts as stuck.
+    launch=False: never start CE (used by restart)."""
     os.makedirs(DIR, exist_ok=True)
-    _seq[0] += 1
-    rid = str(_seq[0])
+    rid = str(next(_seq))
     lines = [f'cmd={cmd.encode().hex()}', f'id={rid.encode().hex()}']
     for k, v in kw.items():
         if v is None:
             continue
         b = v if isinstance(v, bytes) else (('1' if v else '0') if isinstance(v, bool) else str(v)).encode()
         lines.append(f'{k}={b.hex()}')
-    for p in (RESP, REQ):
-        if os.path.exists(p):
-            os.remove(p)
+    _remove(RESP)
+    _remove(REQ)
     tmp = REQ + '.tmp'
     with open(tmp, 'w', newline='\n') as f:
         f.write('\n'.join(lines) + '\n')
     os.replace(tmp, REQ)
     t0 = time.time()
-    pickup = 1.5     # seconds the bridge gets to take the request before CE is started
+    started = None   # when this call started CE
     while True:
+        waited = time.time() - t0
         if os.path.exists(RESP):
             try:
                 with open(RESP, 'rb') as f:
@@ -148,20 +171,39 @@ def call(cmd, timeout=120.0, **kw):
                 time.sleep(0.01)
                 continue
             head, _, rest = text.partition('\n')
-            if head == f'id={rid}':
-                os.remove(RESP)
-                status, _, body = rest.partition('\n')
-                if status != 'ok':
-                    raise RuntimeError(body)
-                return body
-        elif os.path.exists(REQ) and time.time() - t0 > pickup:
-            if pickup < 30:
-                launch_ce()          # the request stays queued until the new CE's bridge picks it up
-                pickup = 30
-            else:
-                os.remove(REQ)
-                raise RuntimeError(f'Cheat Engine bridge did not start within 30s ({CE_EXE})')
-        if time.time() - t0 > timeout:
+            fields = dict(f.split('=', 1) for f in head.split() if '=' in f)
+            _remove(RESP)
+            if fields.get('id') != rid:
+                continue     # the late answer to an earlier request that timed out
+            if fields.get('v') != str(BRIDGE_VERSION):
+                raise RuntimeError(f'the bridge in that Cheat Engine is version {fields.get("v", "1")}, the server '
+                                   f'needs {BRIDGE_VERSION}: copy {BRIDGE} into its autorun folder and restart it')
+            status, _, body = rest.partition('\n')
+            if status != 'ok':
+                raise RuntimeError(body)
+            return body
+        if os.path.exists(REQ):
+            stuck = None
+            if SHARED:
+                if waited > 1.5:
+                    stuck = ('the Cheat Engine started by hand did not take the request: is it running with the '
+                             'bridge on (ce-mcp menu)? Without %LOCALAPPDATA%\\ce-mcp\\enabled, ce-mcp starts its own')
+            elif started is not None:
+                if time.time() - started > 30:
+                    stuck = f'Cheat Engine started but its bridge did not answer within 30s ({CE_EXE})'
+            elif _running():
+                if waited > patience:
+                    stuck = (f'Cheat Engine (pid {_ce["proc"].pid}) is running but not answering: busy with an '
+                             'earlier request, or stuck on a dialog on its hidden desktop. Retry, or restart()')
+            elif not launch:
+                stuck = 'Cheat Engine is not running'
+            elif waited > 1.5:
+                launch_ce()  # the request stays queued until the new CE's bridge picks it up
+                started = time.time()
+            if stuck:
+                _remove(REQ)
+                raise RuntimeError(stuck)
+        if waited > timeout:
             raise RuntimeError(f'{cmd} timed out after {timeout:.0f}s')
         time.sleep(0.01)
 
@@ -223,7 +265,7 @@ def read(addr: str, type: str = 'u32', count: int = 1) -> str:
     """Read `count` values of u8/s8/u16/s16/u32/s32/u64/s64/f32/f64/ptr, or 'str' (count = max length)
     or 'bytes' (count = length, hex)."""
     if type in ('str', 'bytes'):
-        raw = bytes.fromhex(call('read', addr=A(addr), size=count if count > 1 else 64))
+        raw = bytes.fromhex(call('read', addr=A(addr), size=64 if type == 'str' and count == 1 else count))
         return raw.hex(' ') if type == 'bytes' else repr(raw.split(b'\0')[0].decode('latin-1'))
     f = FMT[type]
     n = struct.calcsize(f)
@@ -296,9 +338,8 @@ def scan_next(condition: str, show: int = 20) -> str:
     """Filter the current scan: '5' / '=5', '>5', '<5', '1..8', 'increased', 'decreased',
     'changed', 'unchanged', '+=N' (increased by N), '-=N' (decreased by N)."""
     c = condition.strip()
-    words = {'increased': 'increased', 'decreased': 'decreased', 'changed': 'changed', 'unchanged': 'unchanged'}
-    if c in words:
-        opt, v1, v2 = words[c], '', ''
+    if c in ('increased', 'decreased', 'changed', 'unchanged'):
+        opt, v1, v2 = c, '', ''
     elif c.startswith('+='):
         opt, v1, v2 = 'increasedby', c[2:], ''
     elif c.startswith('-='):
@@ -369,8 +410,28 @@ def disasm(addr: str, count: int = 12, before: int = 0) -> str:
 @mcp.tool()
 def aa(name: str, script: str = '', enable: bool = True) -> str:
     """Auto assembler. enable=True runs `script` (its [ENABLE] part if it has sections) and remembers it
-    under `name`; enable=False runs the [DISABLE] part of the remembered script. {$lua} is refused."""
+    under `name`; without a script it re-enables the last one given for `name`. enable=False runs the
+    [DISABLE] part of the remembered script. Patches stay in the target when CE closes. {$lua} is refused."""
     return call('aa', name=name, script=script if enable else '', enable=enable)
+
+
+@mcp.tool()
+def restart() -> str:
+    """Kill the Cheat Engine that ce-mcp started (when it stops answering) and start a fresh one; attach
+    again afterwards. Its breakpoints are removed first if it still answers."""
+    if SHARED:
+        raise RuntimeError('ce-mcp uses a Cheat Engine started by hand (the enabled file): restart that one')
+    with _lock:
+        if _running():
+            try:
+                _call('bp_clear', 5, {}, patience=2, launch=False)
+            except RuntimeError:
+                pass
+            _ce['proc'].kill()
+        _ce['proc'] = None
+        _remove(REQ)
+        _remove(RESP)
+        return _call('status', 60, {})
 
 
 @mcp.tool()

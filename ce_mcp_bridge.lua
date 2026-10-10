@@ -6,12 +6,12 @@
 -- hidden and non-elevated (CE_MCP_PARENT = the server's PID); CE then closes when the server exits.
 -- The transport is a file mailbox in %LOCALAPPDATA%\ce-mcp, so an elevated CE (run by hand) still works:
 -- the client writes `req`, a timer here answers in `resp`.
--- Every request line is `key=<hex of the value bytes>`; the reply is `id=N`, `ok`/`err`, then text.
+-- Every request line is `key=<hex of the value bytes>`; the reply is `id=N v=VERSION`, `ok`/`err`, then text.
 --
 -- When CE is started by hand, the bridge polls only if %LOCALAPPDATA%\ce-mcp\enabled exists; the "ce-mcp"
--- main menu toggles it. Lua inside auto assembler scripts is refused, because in an elevated CE it would
--- run with more rights than the caller.
+-- main menu toggles it. Lua inside auto assembler scripts is refused (see the README's Safety section).
 
+local VERSION = 2  -- must match BRIDGE_VERSION in ce_mcp.py
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
 -- a CE started by ce-mcp serves that server's own mailbox; one started by hand serves the shared one
 local BOX = os.getenv('CE_MCP_MAILBOX') or DIR
@@ -236,6 +236,9 @@ function cmd.bp_set(r)
   if not trig then fail('kind must be write, access or execute') end
   if trig == bptExecute then size = 1 end
   if bps[a] then fail(string.format('breakpoint already set at %X (bp_clear first)', a)) end
+  local n = 0
+  for _ in pairs(bps) do n = n + 1 end
+  if n >= 4 then fail('all 4 hardware breakpoints are in use (bp_clear one first)') end
   if not debug_isDebugging() then
     debugProcess(tonumber(r.debugger) or 0)
     if not debug_isDebugging() then fail('could not start the debugger') end
@@ -319,12 +322,14 @@ function cmd.disasm(r)
   return table.concat(out, '\n')
 end
 
-local scripts = {}  -- [name] = {script, info}
+local scripts = {}  -- enabled: [name] = {script, info}
+local last = {}     -- [name] = the last script given, so enabling again needs no script
 
 function cmd.aa(r)
   need_process()
   local nm, script = r.name, r.script or ''
   if r.enable == '1' then
+    if script == '' then script = last[nm] or fail('no script given for ' .. tostring(nm)) end
     local low = script:lower()
     if low:find('{$lua', 1, true) or low:find('luacall', 1, true) then
       fail('Lua in auto assembler scripts is not allowed through the bridge')
@@ -333,6 +338,7 @@ function cmd.aa(r)
     local ok, info = autoAssemble(script)
     if not ok then fail('auto assembler failed: ' .. tostring(info)) end
     scripts[nm] = { script = script, info = info }
+    last[nm] = script
     return 'enabled ' .. nm
   end
   local s = scripts[nm]
@@ -343,13 +349,18 @@ function cmd.aa(r)
   return 'disabled ' .. nm
 end
 
+function cmd.window(r)
+  if r.show == '1' then unhideMainCEwindow() else hideAllCEWindows() end
+  return r.show == '1' and 'shown' or 'hidden'
+end
+
 ---------------------------------------------------------------- mailbox
 
 local function respond(id, ok, text)
   os.remove(RESP_TMP)
   local f = io.open(RESP_TMP, 'wb')
   if not f then return end
-  f:write('id=', id, '\n', ok and 'ok' or 'err', '\n', text or '')
+  f:write('id=', id, ' v=', VERSION, '\n', ok and 'ok' or 'err', '\n', text or '')
   f:close()
   os.remove(RESP)
   os.rename(RESP_TMP, RESP)
@@ -391,11 +402,6 @@ local toggle = createMenuItem(MainForm)
 toggle.Caption = 'Toggle bridge'
 toggle.OnClick = function() set_enabled(not timer.Enabled) end
 menu.add(toggle)
-
-function cmd.window(r)
-  if r.show == '1' then unhideMainCEwindow() else hideAllCEWindows() end
-  return r.show == '1' and 'shown' or 'hidden'
-end
 
 local parent = tonumber(os.getenv('CE_MCP_PARENT') or '')
 if parent then

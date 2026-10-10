@@ -58,7 +58,7 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 | `lua(code, timeout)` | Lua with CE's whole API, one call: walk structures, batch reads, anything the tools don't cover. Returns what it printed and returned. Only in the CE ce-mcp starts. |
 | `disasm(addr, count, before)` | Disassembly with `module+offset` names. |
 | `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. Enabling again without a script reuses the last one. Patches stay in the target when CE closes. |
-| `restart()` | Replace a launched CE that stopped answering (its breakpoints are removed first if it still can). |
+| `restart()` | Replace a launched CE that stopped answering and attach the same process again (its breakpoints are removed first if it still can). |
 
 ## Tests
 

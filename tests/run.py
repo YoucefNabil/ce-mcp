@@ -51,6 +51,10 @@ def offline():
         threading.Thread(target=run, daemon=True).start()
 
     v = c.BRIDGE_VERSION
+    import asyncio
+    check('tools answer in plain text (no JSON wrapping)',
+          lambda: [t.name for t in asyncio.run(c.mcp.list_tools()) if t.outputSchema],
+          lambda o: o == '[]')
     try:
         fake([(f'id=1 v={v}', 'stale'), (f'id={{id}} v={v}', 'fresh')])
         check('stale reply is skipped', lambda: c.call('status'), lambda o: o == 'fresh')
@@ -197,8 +201,11 @@ def online():
         check('parallel calls (3 threads x 30 reads)', lambda: f'{90 - len(errors)}/90', lambda o: o == '90/90')
 
         old = c._ce['proc'].pid
-        check('restart gives a new CE', lambda: (c.restart(), c._ce['proc'].pid)[1], lambda o: o != str(old))
-        check('works after restart', lambda: c.attach(str(tgt.pid)), lambda o: f'pid {tgt.pid}' in o)
+        out = []
+        check('restart gives a new CE', lambda: (out.append(c.restart()), c._ce['proc'].pid)[1],
+              lambda o: o != str(old))
+        check('restart attaches the same process again', lambda: out[0], lambda o: f'pid {tgt.pid}' in o)
+        check('works after restart', lambda: c.read(addr), lambda o: o.split()[0].isdigit())
     finally:
         tgt.kill()
 

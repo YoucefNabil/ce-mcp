@@ -249,31 +249,33 @@ mcp = FastMCP('ce-mcp', instructions=(
     'or many reads at once, lua(code) runs Lua with CE\'s whole API in one call.'))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def attach(process: str) -> str:
     """Open a process in Cheat Engine by name ("Game.exe") or PID."""
-    return call('attach', process=process)
+    out = call('attach', process=process)
+    _ce['attached'] = int(out.split()[1])  # 'pid N name ...': restart() attaches it again
+    return out
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def status() -> str:
     """Attached process, debugger state, breakpoint count. Also tells whether the bridge is up."""
     return call('status', timeout=60)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def modules(filter: str = '') -> str:
     """List modules as `base size name` (substring filter)."""
     return call('modules', filter=filter)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def symbol(addr: str) -> str:
     """Resolve an address or expression to `hex (module+offset)`."""
     return call('symbol', addr=A(addr))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def read(addr: str, type: str = 'u32', count: int = 1) -> str:
     """Read `count` values of u8/s8/u16/s16/u32/s32/u64/s64/f32/f64/ptr, or 'str' (count = max length)
     or 'bytes' (count = length, hex)."""
@@ -289,7 +291,7 @@ def read(addr: str, type: str = 'u32', count: int = 1) -> str:
     return '\n'.join(f'+{i * n:#x}: {_show(v, type)}' for i, v in enumerate(vals))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def hexdump(addr: str, size: int = 0x100) -> str:
     """Hex + ASCII dump (max 0x1000 bytes)."""
     size = min(size, 0x1000)
@@ -301,7 +303,7 @@ def hexdump(addr: str, size: int = 0x100) -> str:
     return '\n'.join(out)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def write(addr: str, value: str, type: str = 'u32') -> str:
     """Write one value of `type` (as for read), or 'bytes' (hex string) / 'str'. Returns old -> new.
     Code pages may be read-only: patch code with aa() instead."""
@@ -331,7 +333,7 @@ def _first(value):
     return 'exact', v.lstrip('='), ''
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def scan(value: str = '?', type: str = 'u32', module: str = '', start: str = '', end: str = '',
          writable_only: bool = True, show: int = 20) -> str:
     """First scan (replaces the previous scan). value: '5', '=5', '>5', '<5', '1..8', or '?' for an
@@ -348,7 +350,7 @@ def scan(value: str = '?', type: str = 'u32', module: str = '', start: str = '',
     return out
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def scan_next(condition: str, show: int = 20) -> str:
     """Filter the current scan: '5' / '=5', '>5', '<5', '1..8', 'increased', 'decreased',
     'changed', 'unchanged', '+=N' (increased by N), '-=N' (decreased by N)."""
@@ -367,19 +369,19 @@ def scan_next(condition: str, show: int = 20) -> str:
     return call('next', option=opt, v1=_num(v1, t) if v1 else '', v2=_num(v2, t) if v2 else '', show=show)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def results(offset: int = 0, show: int = 50, aob: bool = False) -> str:
     """Page through the current scan results (or the last aob_scan results)."""
     return call('results', which='aob' if aob else 'main', offset=offset, show=show)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def aob_scan(pattern: str, module: str = '', show: int = 20) -> str:
     """Find a byte pattern ('48 8B ?? ?? 89') in all memory or one module. Does not touch the main scan."""
     return call('aob', pattern=pattern, module=module, show=show)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, stack: bool = False,
            max_hits: int = 0) -> str:
     """Hardware breakpoint that logs and continues (max 4). kind: write / access (data, size 1/2/4/8)
@@ -392,7 +394,7 @@ def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, sta
     return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger, stack=stack, max_hits=max_hits)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def bp_hits(addr: str = '', clear: bool = False) -> str:
     """Show what the breakpoints caught so far (all, or one address). clear=True also removes them."""
     out = call('bp_hits', addr=A(addr) if addr else '')
@@ -401,13 +403,13 @@ def bp_hits(addr: str = '', clear: bool = False) -> str:
     return out
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def bp_clear(addr: str = '') -> str:
     """Remove ce-mcp breakpoints (all, or one address)."""
     return call('bp_clear', addr=A(addr) if addr else '')
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def find_writers(addr: str, seconds: float = 10, size: int = 4, kind: str = 'write', stack: bool = False) -> str:
     """'Find out what writes/accesses this address': breakpoint for `seconds` (the user triggers the
     change in game meanwhile), then report the instructions and remove the breakpoint. stack as in bp_set."""
@@ -420,13 +422,13 @@ def find_writers(addr: str, seconds: float = 10, size: int = 4, kind: str = 'wri
         call('bp_clear', addr=a)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def disasm(addr: str, count: int = 12, before: int = 0) -> str:
     """Disassemble `count` instructions from addr, starting `before` instructions earlier (marked '>')."""
     return call('disasm', addr=A(addr), count=count, before=before)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def aa(name: str, script: str = '', enable: bool = True) -> str:
     """Auto assembler. enable=True runs `script` (its [ENABLE] part if it has sections) and remembers it
     under `name`; without a script it re-enables the last one given for `name`. enable=False runs the
@@ -434,7 +436,7 @@ def aa(name: str, script: str = '', enable: bool = True) -> str:
     return call('aa', name=name, script=script if enable else '', enable=enable)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def lua(code: str, timeout: float = 10) -> str:
     """Run Lua in Cheat Engine with its whole API (readQword, readString, getAddress, disassemble,
     AOBScan, ...): returns what the code printed, then its return values (tostring'd, max 20000 chars).
@@ -445,10 +447,11 @@ def lua(code: str, timeout: float = 10) -> str:
     return call('lua', timeout=timeout + 30, code=code, limit=timeout)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def restart() -> str:
-    """Kill the Cheat Engine that ce-mcp started (when it stops answering) and start a fresh one; attach
-    again afterwards. Its breakpoints are removed first if it still answers."""
+    """Kill the Cheat Engine that ce-mcp started (when it stops answering) and start a fresh one, attached
+    to the same process if it is still running. Its breakpoints are removed first if it still answers;
+    scans, aa scripts and Lua globals do not carry over."""
     if SHARED:
         raise RuntimeError('ce-mcp uses a Cheat Engine started by hand (the enabled file): restart that one')
     with _lock:
@@ -461,7 +464,11 @@ def restart() -> str:
         _ce['proc'] = None
         _remove(REQ)
         _remove(RESP)
-        return _call('status', 60, {})
+        out = _call('status', 60, {})
+        pid = _ce.get('attached')
+        if pid and _alive(pid):
+            out = _call('attach', 60, {'process': str(pid)})
+        return out
 
 
 if __name__ == '__main__':

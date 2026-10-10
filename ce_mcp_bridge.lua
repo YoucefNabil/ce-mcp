@@ -49,12 +49,16 @@ local bps = {}     -- [address] = {kind, size, total, hits = {[insn] = {n, first
 
 ---------------------------------------------------------------- process
 
+local function proc_name(pid)
+  return (getProcesslist() or {})[pid] or '?'
+end
+
 local function status_text()
   local pid = getOpenedProcessID()
   if pid == 0 then return 'not attached' end
   local bpn = 0
   for _ in pairs(bps) do bpn = bpn + 1 end
-  return string.format('pid %d %s%s, debugger %s, %d breakpoint(s)', pid, process or '?',
+  return string.format('pid %d %s%s, debugger %s, %d breakpoint(s)', pid, proc_name(pid),
     targetIs64Bit() and ' (64-bit)' or ' (32-bit)',
     debug_isDebugging() and ('on, interface ' .. tostring(debug_getCurrentDebuggerInterface())) or 'off', bpn)
 end
@@ -64,10 +68,19 @@ function cmd.status() return status_text() end
 function cmd.attach(r)
   local p = r.process
   local pid = tonumber(p)
-  openProcess(pid or p)
-  local now = getOpenedProcessID()
-  if now == 0 or (pid and now ~= pid) or (not pid and (process or ''):lower() ~= p:lower()) then
-    fail('could not open ' .. p .. ' (is it running?)')
+  if not pid then
+    -- resolve the name ourselves: CE's `process` global is not reliably set
+    for id, n in pairs(getProcesslist() or {}) do
+      if n:lower() == p:lower() and (not pid or id > pid) then pid = id end
+    end
+    if not pid then fail(p .. ' is not running') end
+  end
+  openProcess(pid)
+  if getOpenedProcessID() ~= pid then fail(string.format('could not open pid %d', pid)) end
+  -- OpenProcess can hand out a handle that cannot read memory (e.g. an elevated target)
+  if #(enumModules() or {}) == 0 then
+    fail(string.format('opened %s (pid %d) but cannot read its memory: is it running as administrator? '
+      .. 'The CE started by ce-mcp is not elevated', proc_name(pid), pid))
   end
   return status_text()
 end

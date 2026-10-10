@@ -1,0 +1,56 @@
+# ce-mcp
+
+An [MCP](https://modelcontextprotocol.io) server that drives a running **Cheat Engine 7.5** through a small Lua bridge,
+so an assistant such as Claude Code can scan memory, set logging hardware breakpoints ("find out what writes this
+address"), disassemble and test auto assembler patches with short tool calls. CE stays usable as normal.
+
+## How it works
+
+`ce/` is a private copy of Cheat Engine, made on first use from an installed Cheat Engine (`Program Files\Cheat
+Engine*`, or the folder in `CE_MCP_SOURCE`); it is not part of this repo. When a tool call finds no bridge answering,
+the server copies `ce_mcp_bridge.lua` into `ce/autorun/` and starts `ce/cheatengine-x86_64.exe` **minimized, hidden
+and non-elevated** (`__COMPAT_LAYER=RunAsInvoker`, so no UAC prompt), with `CE_MCP_PARENT` set to its own PID. The
+bridge enables itself, hides CE's windows and closes CE (after removing its breakpoints) when the server process is
+gone. Nothing to start by hand; `window(show=True)` brings the GUI up if you want to watch.
+
+Requests go through a file mailbox in `%LOCALAPPDATA%\ce-mcp` (`req` / `resp`, written via rename), which also works
+with an elevated CE started by hand (an elevated process's named pipe would be read-only for the server). For that
+case copy the bridge into that CE's `autorun` folder; it polls only if `%LOCALAPPDATA%\ce-mcp\enabled` exists, and the
+**ce-mcp** main-menu entry toggles it. Commands are serialized; one client.
+
+## Install
+
+1. Install [Cheat Engine](https://www.cheatengine.org) 7.5 (tested), or point `CE_MCP_SOURCE` at a CE folder.
+2. `pip install mcp`
+3. `claude mcp add --scope user ce-mcp -- <python.exe> <path>/ce-mcp/ce_mcp.py`
+4. The target must not run elevated (the launched CE is not).
+
+Windows only, 64-bit targets.
+
+Breakpoints default to CE's VEH debugger, so the target keeps running when CE closes.
+
+## Tools
+
+Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbols, `[[Game.exe+10]+8]`.
+
+| Tool | What it does |
+|---|---|
+| `attach(process)` / `status()` | Open a process by name or PID / show process, debugger and bridge state. |
+| `modules(filter)` / `symbol(addr)` | Module list (`base size name`) / address to `module+offset`. |
+| `read(addr, type, count)` / `write(addr, value, type)` | `u8..u64`, `s8..s64`, `f32`, `f64`, `ptr`, `str`, `bytes`. Write returns old -> new. |
+| `hexdump(addr, size)` | Hex + ASCII. |
+| `scan(value, type)` | First scan: `5`, `>5`, `<5`, `1..8`, `?` (unknown). Types as above plus `aob`. Optional `module` / range. |
+| `scan_next(condition)` | `5`, `>5`, `<5`, `1..8`, `increased`, `decreased`, `changed`, `unchanged`, `+=N`, `-=N`. |
+| `results(offset, show)` | Page through results. |
+| `aob_scan(pattern, module)` | Byte pattern search, separate from the main scan. |
+| `bp_set(addr, kind, size)` / `bp_hits` / `bp_clear` | Logging hardware breakpoints (write / access / execute, max 4). Hits grouped by instruction with registers of first and last hit and the value after a write. |
+| `find_writers(addr, seconds)` | bp_set + wait + report + clear: CE's "find out what writes this address". |
+| `disasm(addr, count, before)` | Disassembly with `module+offset` names. |
+| `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. |
+| `window(show)` | Show or hide the CE window. |
+
+## Safety
+
+The launched CE has the same rights as the server. If you run an elevated CE with the bridge enabled, any process of
+your user can drive it through the mailbox with admin rights on the attached process; for that case `{$lua}` /
+`luaCall` in auto assembler scripts is refused, since it would run Lua in elevated CE.

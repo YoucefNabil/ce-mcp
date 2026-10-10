@@ -1,0 +1,7 @@
+[project]
+name = "ce-mcp"
+version = "0.1.0"
+description = "MCP server that drives Cheat Engine through a Lua bridge"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2"]

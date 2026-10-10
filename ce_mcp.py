@@ -67,6 +67,7 @@ _k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 _k32.CloseHandle.argtypes = [wt.HANDLE]
 _k32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
 _k32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+_k32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
 DESKTOP = 'ce-mcp'
 
 
@@ -96,11 +97,31 @@ def _alive(pid):
     return alive
 
 
+def _kill_orphan(pid):
+    """Kill `pid` if it is still our CE copy (a PID can be reused, so check the executable first)."""
+    h = _k32.OpenProcess(0x1001, False, pid)  # PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return
+    buf, size = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
+    if (_k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+            and os.path.normcase(buf.value) == os.path.normcase(CE_EXE)):
+        _k32.TerminateProcess(h, 1)
+        _k32.WaitForSingleObject(h, 5000)
+    _k32.CloseHandle(h)
+
+
 def _prune_mailboxes():
-    """Remove the mailboxes of servers that are no longer running."""
+    """Remove the mailboxes of servers that are no longer running, and the CE of one that is still open: a CE
+    stuck in a blocking call when its server exited cannot run the bridge's watchdog."""
     for name in os.listdir(ROOT) if os.path.isdir(ROOT) else []:
         if name.isdigit() and int(name) != os.getpid() and not _alive(int(name)):
-            shutil.rmtree(os.path.join(ROOT, name), ignore_errors=True)
+            box = os.path.join(ROOT, name)
+            try:
+                with open(os.path.join(box, 'ce.pid')) as f:
+                    _kill_orphan(int(f.read()))
+            except (OSError, ValueError):
+                pass
+            shutil.rmtree(box, ignore_errors=True)
 
 
 def launch_ce():
@@ -129,6 +150,8 @@ def launch_ce():
                                ctypes.create_unicode_buffer(block), CE_DIR, ctypes.byref(si), ctypes.byref(pi)):
         raise RuntimeError(f'starting Cheat Engine failed (error {ctypes.get_last_error()})')
     _ce['proc'] = _Proc(pi)
+    with open(os.path.join(DIR, 'ce.pid'), 'w') as f:  # for _prune_mailboxes, should this CE outlive the server
+        f.write(str(pi.dwProcessId))
 
 
 def _remove(p):

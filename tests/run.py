@@ -226,6 +226,25 @@ def two_servers():
     check('each CE closes after its server exits', closed, lambda o: o == '2 CE(s), 0 still running')
 
 
+def orphan():
+    """A server exits while its CE is blocked in a long call: the watchdog cannot run, so the next launch's
+    cleanup kills that CE."""
+    kid = subprocess.Popen([sys.executable, __file__, '--hang'], stdout=subprocess.PIPE, text=True)
+    ce = int(kid.communicate(timeout=60)[0].split('ce=')[1])
+    time.sleep(6)  # two watchdog periods
+    check('a blocked CE outlives its server', lambda: c._alive(ce), lambda o: o == 'True')
+    c._prune_mailboxes()
+    check('the next launch kills it', lambda: c._alive(ce), lambda o: o == 'False')
+
+
+def hang():
+    c.status()
+    threading.Thread(target=lambda: c.lua('sleep(600000)', timeout=1), daemon=True).start()
+    time.sleep(2)
+    print(f'ce={c._ce["proc"].pid}', flush=True)
+    os._exit(0)
+
+
 def child(tag):
     t = subprocess.Popen([sys.executable, '-u', '-c', f'import ctypes, time\nv = ctypes.c_uint32({tag})\n'
                           'print(hex(ctypes.addressof(v)), flush=True)\ntime.sleep(60)'], stdout=subprocess.PIPE, text=True)
@@ -242,9 +261,12 @@ if __name__ == '__main__':
     if sys.argv[1:2] == ['--child']:
         child(int(sys.argv[2]))
         sys.exit()
+    if sys.argv[1:2] == ['--hang']:
+        hang()
     offline()
     if '--offline' not in sys.argv:
         online()
         two_servers()
+        orphan()
     print(f'\n{len(passed)} passed, {len(failed)} failed' + (f': {", ".join(failed)}' if failed else ''))
     sys.exit(1 if failed else 0)

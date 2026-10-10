@@ -20,7 +20,7 @@ case copy the bridge into that CE's `autorun` folder; it polls only if `%LOCALAP
 **ce-mcp** main-menu entry toggles it.
 
 Each server has its own mailbox (`%LOCALAPPDATA%\ce-mcp\<server pid>`) and its own CE, so several sessions can run
-at once; mailboxes of servers that are gone are removed at the next launch. With the `enabled` file present, servers
+at once; mailboxes of servers that are gone are removed at the next launch, along with their CE if it is still open (a CE stuck in a blocking call when its server exited cannot close itself). With the `enabled` file present, servers
 use the shared mailbox of the hand-started CE instead, and never start a CE of their own.
 
 Requests are answered one at a time. The bridge tags each reply with its protocol version, and the server refuses a

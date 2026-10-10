@@ -22,7 +22,7 @@ ROOT = os.path.join(os.environ['LOCALAPPDATA'], 'ce-mcp')
 SHARED = os.path.exists(os.path.join(ROOT, 'enabled'))
 DIR = ROOT if SHARED else os.path.join(ROOT, str(os.getpid()))
 REQ, RESP = os.path.join(DIR, 'req'), os.path.join(DIR, 'resp')
-BRIDGE_VERSION = 3  # must match VERSION in ce_mcp_bridge.lua
+BRIDGE_VERSION = 4  # must match VERSION in ce_mcp_bridge.lua
 FMT = {'u8': '<B', 's8': '<b', 'u16': '<H', 's16': '<h', 'u32': '<I', 's32': '<i',
        'u64': '<Q', 's64': '<q', 'f32': '<f', 'f64': '<d', 'ptr': '<Q'}
 _seq = itertools.count(int(time.time() * 1000) % 1_000_000_000)
@@ -406,15 +406,23 @@ def aob_scan(pattern: str, module: str = '', show: int = 20) -> str:
 
 @mcp.tool(structured_output=False)
 def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, stack: bool = False,
-           max_hits: int = 0) -> str:
+           max_hits: int = 0, where: str = '', collect: str = '', capture: str = '') -> str:
     """Hardware breakpoint that logs and continues (max 4). kind: write / access (data, size 1/2/4/8)
     or execute (code). Hits are grouped by instruction with registers of the first and last hit.
     stack=True also logs the 6 qwords at RSP as module+offset where they point into code (callers; [RSP]
     is the return address only at a function's first instruction). max_hits > 0 stops the breakpoint
     after that many hits and keeps what it caught, for addresses hit every frame (each hit slows the
     game). debugger: 2 = VEH (default; the game survives CE closing), 1 = Windows, 0 = CE's setting.
-    Only used when the debugger is not running yet."""
-    return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger, stack=stack, max_hits=max_hits)
+    Only used when the debugger is not running yet.
+    Operands below: a number, a register (RAX..R15, RIP) or memory [REG], [REG+0x10], [REG-8], [0x1234]
+    with an optional :size in bytes (default 8, little-endian), all read at the moment of the hit.
+    where: only count hits where all comparisons hold, e.g. 'RAX==0x35FC5F20 && [RBP+0x30]:4!=0'
+    (==, !=, <, >, <=, >=; < and > unsigned). Skipped hits are counted apart and don't use up max_hits.
+    collect: comma-separated operands whose distinct values are counted per instruction, e.g. 'RAX, [RSP]'.
+    capture: comma-separated operands shown with the first and last hit; memory up to 256 bytes is dumped
+    in hex, e.g. '[RBP+0x460], [RSI]:0x40'."""
+    return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger, stack=stack, max_hits=max_hits,
+                where=where, collect=collect, capture=capture)
 
 
 @mcp.tool(structured_output=False)
@@ -433,11 +441,14 @@ def bp_clear(addr: str = '') -> str:
 
 
 @mcp.tool(structured_output=False)
-def find_writers(addr: str, seconds: float = 10, size: int = 4, kind: str = 'write', stack: bool = False) -> str:
+def find_writers(addr: str, seconds: float = 10, size: int = 4, kind: str = 'write', stack: bool = False,
+                 where: str = '', collect: str = '', capture: str = '') -> str:
     """'Find out what writes/accesses this address': breakpoint for `seconds` (the user triggers the
-    change in game meanwhile), then report the instructions and remove the breakpoint. stack as in bp_set."""
+    change in game meanwhile), then report the instructions and remove the breakpoint. stack, where,
+    collect and capture as in bp_set."""
     a = A(addr)
-    call('bp_set', addr=a, kind=kind, size=size, debugger=2, stack=stack)
+    call('bp_set', addr=a, kind=kind, size=size, debugger=2, stack=stack, where=where, collect=collect,
+         capture=capture)
     try:
         time.sleep(seconds)
         return call('bp_hits', addr=a)

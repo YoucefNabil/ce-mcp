@@ -45,7 +45,7 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 
 | Tool | What it does |
 |---|---|
-| `attach(process)` / `status()` | Open a process by name or PID / show process, debugger and bridge state. |
+| `attach(process)` / `status()` | Open a process by name or PID / show process, debugger and bridge state. If the attached process exits (e.g. the game was restarted), every call says so, with the new PID when it runs again, instead of breakpoints silently never firing. |
 | `modules(filter)` / `symbol(addr)` | Module list (`base size name`) / address to `module+offset`. |
 | `read(addr, type, count)` / `write(addr, value, type)` | `u8..u64`, `s8..s64`, `f32`, `f64`, `ptr`, `str`, `bytes`. Write returns old -> new. |
 | `hexdump(addr, size)` | Hex + ASCII. |
@@ -53,8 +53,8 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 | `scan_next(condition)` | `5`, `>5`, `<5`, `1..8`, `increased`, `decreased`, `changed`, `unchanged`, `+=N`, `-=N`. |
 | `results(offset, show)` | Page through results. |
 | `aob_scan(pattern, module)` | Byte pattern search, separate from the main scan. |
-| `bp_set(addr, kind, size, stack, max_hits)` / `bp_hits` / `bp_clear` | Logging hardware breakpoints (write / access / execute, max 4). Hits grouped by instruction with registers of first and last hit and the value after a write. `stack=True` adds the qwords at RSP (callers, as `module+offset`); `max_hits` stops a breakpoint on a hot address and keeps its hits. |
-| `find_writers(addr, seconds, stack)` | bp_set + wait + report + clear: CE's "find out what writes this address". |
+| `bp_set(addr, kind, size, stack, max_hits, where, collect, capture)` / `bp_hits` / `bp_clear` | Logging hardware breakpoints (write / access / execute, max 4). Hits grouped by instruction with registers of first and last hit and the value after a write. `stack=True` adds the qwords at RSP (callers, as `module+offset`); `max_hits` stops a breakpoint on a hot address and keeps its hits. `where` counts only hits that match (`RAX==0x35FC5F20 && [RBP+0x30]:4!=0`), `collect` counts the distinct values of registers or memory per instruction (`RAX, [RSP]`), `capture` reads memory at the moment of the hit (`[RSI]:0x40`), before the program overwrites it. All are evaluated in the bridge's own handler, never in user Lua. |
+| `find_writers(addr, seconds, stack, where, collect, capture)` | bp_set + wait + report + clear: CE's "find out what writes this address". |
 | `lua(code, timeout)` | Lua with CE's whole API, one call: walk structures, batch reads, anything the tools don't cover. Returns what it printed and returned. Only in the CE ce-mcp starts. |
 | `disasm(addr, count, before)` | Disassembly with `module+offset` names. |
 | `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. Enabling again without a script reuses the last one. Patches stay in the target when CE closes. |

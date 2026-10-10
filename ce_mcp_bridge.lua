@@ -12,7 +12,7 @@
 -- When CE is started by hand, the bridge polls only if %LOCALAPPDATA%\ce-mcp\enabled exists; the "ce-mcp"
 -- main menu toggles it. Lua inside auto assembler scripts is refused (see the README's Safety section).
 
-local VERSION = 3  -- must match BRIDGE_VERSION in ce_mcp.py
+local VERSION = 4  -- must match BRIDGE_VERSION in ce_mcp.py
 local PARENT = tonumber(os.getenv('CE_MCP_PARENT') or '')  -- set when ce-mcp started this CE
 local ALIVE = os.getenv('CE_MCP_ALIVE')
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
@@ -45,12 +45,10 @@ local function name(a)
   return string.format('%X', a)
 end
 
-local function need_process()
-  if getOpenedProcessID() == 0 then fail('no process attached (use attach)') end
-end
-
 local cmd = {}
 local bps = {}     -- [address] = {kind, size, total, hits = {[insn] = {n, first, last}}, order = {insn...}}
+local attached = {}  -- pid and name given by the last attach, to notice when that process exits
+local checked = 0    -- getTickCount() of the last check that the process still runs
 
 ---------------------------------------------------------------- process
 
@@ -58,9 +56,38 @@ local function proc_name(pid)
   return (getProcesslist() or {})[pid] or '?'
 end
 
+-- The attached process exited (or its PID now belongs to another program): CE keeps the dead handle and
+-- breakpoints just never fire, so say so instead. Returns the message, or nil while the process runs.
+local function exited()
+  local pid = getOpenedProcessID()
+  if pid == 0 or pid ~= attached.pid then return nil end
+  local list = getProcesslist() or {}
+  if list[pid] and list[pid]:lower() == attached.name:lower() then return nil end
+  local newer
+  for id, n in pairs(list) do
+    if n:lower() == attached.name:lower() and (not newer or id > newer) then newer = id end
+  end
+  return string.format('%s (pid %d) has exited%s; its breakpoints are gone', attached.name, pid,
+    newer and string.format(': it runs again as pid %d, attach("%s") again', newer, attached.name) or '')
+end
+
+local function need_process()
+  if getOpenedProcessID() == 0 then fail('no process attached (use attach)') end
+  local now = getTickCount()
+  if now - checked < 1000 then return end
+  local msg = exited()
+  if msg then
+    for a in pairs(bps) do bps[a] = nil end
+    fail(msg)
+  end
+  checked = now
+end
+
 local function status_text()
   local pid = getOpenedProcessID()
   if pid == 0 then return 'not attached' end
+  local msg = exited()
+  if msg then return msg end
   local on, stopped = 0, 0
   for _, rec in pairs(bps) do
     if rec.stopped then stopped = stopped + 1 else on = on + 1 end
@@ -85,6 +112,12 @@ function cmd.attach(r)
   end
   openProcess(pid)
   if getOpenedProcessID() ~= pid then fail(string.format('could not open pid %d', pid)) end
+  attached.pid, attached.name, checked = pid, proc_name(pid), 0
+  -- breakpoints of a process that exited can't be removed any more: forget them
+  local list = getProcesslist() or {}
+  for a, rec in pairs(bps) do
+    if rec.pid ~= pid and not list[rec.pid] then bps[a] = nil end
+  end
   -- OpenProcess can hand out a handle that cannot read memory (e.g. an elevated target)
   if #(enumModules() or {}) == 0 then
     fail(string.format('opened %s (pid %d) but cannot read its memory: is it running as administrator? '
@@ -225,15 +258,114 @@ end
 
 local REGS = { 'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
                'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15' }
+local REGSET = { RIP = true }
+for _, n in ipairs(REGS) do REGSET[n] = true end
 
-local function regs(stack)
+-- An operand of where/collect/capture: a number, a register, or memory [REG], [REG+off], [REG-off] or
+-- [address], with an optional :size in bytes (default 8, read little-endian; capture dumps longer ones).
+local function operand(text, maxsize)
+  local s = text:gsub('%s', '')
+  local inner, sz = s:match('^%[(.-)%]:?(%w*)$')
+  if not inner then
+    local u = s:upper()
+    if REGSET[u] then return { text = u, reg = u } end
+    local v = tonumber(s)
+    if math.type(v) == 'integer' then return { text = s, num = v } end
+    fail('bad operand "' .. text .. '": use a number, a register (RAX..R15, RIP) or [REG+offset]:size')
+  end
+  local size = sz == '' and 8 or tonumber(sz)
+  if math.type(size) ~= 'integer' or size < 1 or size > maxsize then
+    fail(string.format('bad size in "%s" (1..%d bytes)', text, maxsize))
+  end
+  local base, sign, off = inner:upper():match('^(%w+)([%+%-]?)(%w*)$')
+  if not base or (sign == '') ~= (off == '') then fail('bad memory operand "' .. text .. '"') end
+  local o = { text = s, size = size, off = 0 }
+  if REGSET[base] then o.reg = base else o.addr = tonumber(base) end
+  if off ~= '' then o.off = tonumber(off) end
+  if (not o.reg and math.type(o.addr) ~= 'integer') or math.type(o.off) ~= 'integer' then
+    fail('bad memory operand "' .. text .. '"')
+  end
+  if sign == '-' then o.off = -o.off end
+  return o
+end
+
+local function operands(text, maxsize)
+  local list = {}
+  for part in (text or ''):gmatch('[^,]+') do
+    if part:match('%S') then list[#list + 1] = operand(part, maxsize) end
+  end
+  return list
+end
+
+-- Value of an operand at this moment (in a breakpoint handler): an integer, a hex dump for memory longer
+-- than 8 bytes, or nil when the memory can't be read.
+local function value(o)
+  if o.num then return o.num end
+  if not o.size then return _G[o.reg] end
+  local b = readBytes((o.reg and _G[o.reg] or o.addr) + o.off, o.size, true)
+  if not b or #b < o.size then return nil end
+  if o.size > 8 then return hexbytes(b, ' ') end
+  local v = 0
+  for i = #b, 1, -1 do v = (v << 8) | b[i] end
+  return v
+end
+
+local function show(v)
+  if v == nil then return '?' end
+  return math.type(v) == 'integer' and string.format('%X', v) or v
+end
+
+-- where: comparisons joined by && (or "and"); all must hold. < and > compare unsigned.
+local OPS = { '==', '!=', '<=', '>=', '<', '>' }
+
+local function conditions(text)
+  local list = {}
+  for part in ((text or ''):gsub('%s+[aA][nN][dD]%s+', '&&') .. '&&'):gmatch('(.-)&&') do
+    if part:match('%S') then
+      local c
+      for _, op in ipairs(OPS) do
+        local i = part:find(op, 1, true)
+        if i then
+          c = { op = op, l = operand(part:sub(1, i - 1), 8), r = operand(part:sub(i + #op), 8) }
+          break
+        end
+      end
+      if not c then fail('bad condition "' .. part .. '": compare with ==, !=, <, >, <= or >=') end
+      list[#list + 1] = c
+    end
+  end
+  return list
+end
+
+local function holds(list)
+  for _, c in ipairs(list) do
+    local a, b = value(c.l), value(c.r)
+    if a == nil or b == nil then return false end
+    local ok
+    if c.op == '==' then ok = a == b
+    elseif c.op == '!=' then ok = a ~= b
+    elseif c.op == '<' then ok = math.ult(a, b)
+    elseif c.op == '>' then ok = math.ult(b, a)
+    elseif c.op == '<=' then ok = not math.ult(b, a)
+    else ok = not math.ult(a, b) end
+    if not ok then return false end
+  end
+  return true
+end
+
+local function regs(rec)
   local o = {}
   for i, n in ipairs(REGS) do
     local v = _G[n]
     o[i] = string.format('%s=%X', n, v or 0)
   end
   local s = table.concat(o, ' ')
-  if stack then
+  if #rec.capture > 0 then
+    local c = {}
+    for i, op in ipairs(rec.capture) do c[i] = op.text .. '=' .. show(value(op)) end
+    s = s .. '\n    capture: ' .. table.concat(c, '  ')
+  end
+  if rec.stack then
     -- [RSP] is the return address only at a function's first instruction; deeper slots often hold callers
     local q = {}
     for i = 0, 5 do
@@ -245,12 +377,56 @@ local function regs(stack)
   return s
 end
 
+local COLLECT_MAX = 32  -- distinct values kept per collected operand and instruction
+
+local function tally(h, rec)
+  h.col = h.col or {}
+  for i, op in ipairs(rec.collect) do
+    local t = h.col[i] or { n = {}, order = {}, other = 0 }
+    h.col[i] = t
+    local v = show(value(op))
+    if t.n[v] then t.n[v] = t.n[v] + 1
+    elseif #t.order < COLLECT_MAX then t.n[v] = 1; t.order[#t.order + 1] = v
+    else t.other = t.other + 1 end
+  end
+end
+
 local function active_bps()
   local n = 0
   for _, rec in pairs(bps) do
     if not rec.stopped then n = n + 1 end
   end
   return n
+end
+
+local function on_hit(a, rec, trig)
+  if #rec.where > 0 and not holds(rec.where) then
+    rec.skipped = rec.skipped + 1
+    return
+  end
+  -- data breakpoints trap after the instruction ran, so report the one before RIP
+  local ip = (trig == bptExecute) and RIP or getPreviousOpcode(RIP)
+  rec.total = rec.total + 1
+  local h = rec.hits[ip]
+  if not h and #rec.order < 64 then
+    h = { n = 0, first = regs(rec) }
+    rec.hits[ip] = h
+    rec.order[#rec.order + 1] = ip
+  end
+  if h then
+    h.n = h.n + 1
+    if h.n > 1 then h.last = regs(rec) end
+    if trig ~= bptExecute then
+      local v = readBytes(a, rec.size, true)
+      h.value = v and hexbytes(v, ' ') or '?'
+    end
+    if #rec.collect > 0 then tally(h, rec) end
+  end
+  if rec.max > 0 and rec.total >= rec.max then
+    -- keep the hits, free the debug register once this handler has returned
+    rec.stopped = true
+    createTimer(1, function() debug_removeBreakpoint(a) end)
+  end
 end
 
 function cmd.bp_set(r)
@@ -261,39 +437,19 @@ function cmd.bp_set(r)
   if trig == bptExecute then size = 1 end
   if bps[a] then fail(string.format('breakpoint already set at %X (bp_clear first)', a)) end
   if active_bps() >= 4 then fail('all 4 hardware breakpoints are in use (bp_clear one first)') end
+  local rec = { kind = kind, size = size, total = 0, skipped = 0, hits = {}, order = {},
+                pid = getOpenedProcessID(), stack = r.stack == '1', max = tonumber(r.max_hits) or 0,
+                where = conditions(r.where), collect = operands(r.collect, 8), capture = operands(r.capture, 256) }
   if not debug_isDebugging() then
     debugProcess(tonumber(r.debugger) or 0)
     if not debug_isDebugging() then fail('could not start the debugger') end
   end
-  local rec = { kind = kind, size = size, total = 0, hits = {}, order = {},
-                stack = r.stack == '1', max = tonumber(r.max_hits) or 0 }
   bps[a] = rec
   debug_setBreakpoint(a, size, trig, bpmDebugRegister, function()
-    if rec.stopped then
-      debug_continueFromBreakpoint(co_run)
-      return 1
-    end
-    -- data breakpoints trap after the instruction ran, so report the one before RIP
-    local ip = (trig == bptExecute) and RIP or getPreviousOpcode(RIP)
-    rec.total = rec.total + 1
-    local h = rec.hits[ip]
-    if not h and #rec.order < 64 then
-      h = { n = 0, first = regs(rec.stack) }
-      rec.hits[ip] = h
-      rec.order[#rec.order + 1] = ip
-    end
-    if h then
-      h.n = h.n + 1
-      if h.n > 1 then h.last = regs(rec.stack) end
-      if trig ~= bptExecute then
-        local v = readBytes(a, size, true)
-        h.value = v and hexbytes(v, ' ') or '?'
-      end
-    end
-    if rec.max > 0 and rec.total >= rec.max then
-      -- keep the hits, free the debug register once this handler has returned
-      rec.stopped = true
-      createTimer(1, function() debug_removeBreakpoint(a) end)
+    if not rec.stopped then
+      -- a Lua error must never leave the target stopped at the breakpoint
+      local ok, err = pcall(on_hit, a, rec, trig)
+      if not ok then rec.err = tostring(err) end
     end
     debug_continueFromBreakpoint(co_run)
     return 1
@@ -302,13 +458,23 @@ function cmd.bp_set(r)
 end
 
 local function hits_text(a, rec)
-  local out = { string.format('%s %s size %d: %d hit(s), %d instruction(s)%s', rec.kind, name(a), rec.size,
-    rec.total, #rec.order, rec.stopped and ', stopped at max_hits' or '') }
+  local out = { string.format('%s %s size %d: %d hit(s), %d instruction(s)%s%s', rec.kind, name(a), rec.size,
+    rec.total, #rec.order, rec.skipped > 0 and string.format(', %d skipped by where', rec.skipped) or '',
+    rec.stopped and ', stopped at max_hits' or '') }
+  if rec.err then out[#out + 1] = 'handler error: ' .. rec.err end
   for _, ip in ipairs(rec.order) do
     local h = rec.hits[ip]
     local d = disassemble(ip)
     out[#out + 1] = string.format('%s x%d  %s', name(ip), h.n, d:match('^.- %- .- %- (.*)$') or d)
     if h.value then out[#out + 1] = '  value after: ' .. h.value end
+    for i, t in ipairs(h.col or {}) do
+      local vs = {}
+      for j, v in ipairs(t.order) do vs[j] = v end
+      table.sort(vs, function(x, y) return t.n[x] > t.n[y] end)
+      for j, v in ipairs(vs) do vs[j] = string.format('%s x%d', v, t.n[v]) end
+      out[#out + 1] = string.format('  %s: %s%s', rec.collect[i].text, table.concat(vs, ', '),
+        t.other > 0 and string.format(' (+%d hits with other values)', t.other) or '')
+    end
     out[#out + 1] = '  first: ' .. h.first
     if h.last then out[#out + 1] = '  last:  ' .. h.last end
   end

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 import ce_mcp as c  # noqa: E402
 
 passed, failed = [], []
+NL = '\n'
 
 
 def check(name, fn, expect):
@@ -139,6 +140,14 @@ def online():
         check('launch is headless (no window, no focus change)', launch_watched,
               lambda o: o.endswith('windows on user desktop: 0 | focus changes: 0'))
         check('attach', lambda: c.attach(str(tgt.pid)), lambda o: f'pid {tgt.pid}' in o)
+        other, oaddr = start_target()
+        check('attach a second process', lambda: c.attach(str(other.pid)), lambda o: f'pid {other.pid}' in o)
+        other.kill()
+        other.wait()
+        time.sleep(1.2)
+        check('exited process is reported', lambda: c.read(oaddr), lambda o: 'has exited' in o)
+        check('status says it exited', c.status, lambda o: 'has exited' in o)
+        check('attach back', lambda: c.attach(str(tgt.pid)), lambda o: f'pid {tgt.pid}' in o)
         v = int(check('read u32', lambda: c.read(addr), lambda o: o.split()[0].isdigit()).split()[0])
         check('read bytes count=1', lambda: c.read(addr, 'bytes', 1), lambda o: len(o) == 2)
         check('read bytes count=3', lambda: c.read(addr, 'bytes', 3), lambda o: len(o.split()) == 3)
@@ -180,6 +189,22 @@ def online():
               lambda o: 'breakpoint on' in o)
         check('status counts the stopped bp apart', c.status, lambda o: '4 breakpoint(s) (+1 stopped' in o)
         check('bp_clear (stopped one included)', c.bp_clear, lambda o: 'removed 5' in o)
+
+        check('bp where that never holds', lambda: (c.bp_set(addr, where='RIP==0'), time.sleep(2.5),
+                                                     c.bp_hits(addr, clear=True))[2],
+              lambda o: ' 0 hit(s)' in o and 'skipped by where' in o)
+        check('bp where on memory', lambda: (c.bp_set(addr, where=f'[{addr}]:4 != 0 and RIP != 0', max_hits=2),
+                                              time.sleep(3.5), c.bp_hits(addr, clear=True))[2],
+              lambda o: ' 2 hit(s)' in o and 'skipped' not in o)
+        check('bp collect counts distinct values', lambda: (c.bp_set(addr, collect=f'[{addr}]:4'), time.sleep(3.5),
+                                                             c.bp_hits(addr, clear=True))[2],
+              lambda o: o.split(f'[{addr}]:4: ')[1].split(NL)[0].count(' x1') >= 2)
+        check('bp capture dumps memory', lambda: (c.bp_set(addr, capture=f'[{addr}]:4, [{addr}]:16'),
+                                                   time.sleep(2.5), c.bp_hits(addr, clear=True))[2],
+              lambda o: 'capture: ' in o and len(o.split('capture: ')[1].split(NL)[0].split('=')[-1].split()) == 16)
+        check('bp bad operand is refused', lambda: c.bp_set(addr, where='RAX=1'), lambda o: 'bad condition' in o)
+        check('bp bad size is refused', lambda: c.bp_set(addr, collect='[RAX]:16'), lambda o: 'bad size' in o)
+        check('no bp left after refusals', c.bp_clear, lambda o: 'removed 0' in o)
 
         for i in range(4):
             check(f'bp {i + 1} of 4', lambda i=i: c.bp_set(hex(base + 8 * i)), lambda o: 'breakpoint on' in o)

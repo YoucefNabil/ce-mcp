@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Youcef Nabil
 """ce-mcp: MCP server that drives Cheat Engine through ce_mcp_bridge.lua.
 
 When the bridge does not answer, the server starts its private CE copy (ce\\) hidden and non-elevated,

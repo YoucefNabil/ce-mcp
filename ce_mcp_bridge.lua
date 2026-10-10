@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (C) 2026 Youcef Nabil
 -- ce-mcp bridge: lets ce_mcp.py (an MCP server) drive Cheat Engine without the GUI.
 --
 -- ce_mcp.py keeps a private CE copy in ce-mcp\ce, syncs this file into its autorun folder and starts it

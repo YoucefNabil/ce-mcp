@@ -54,3 +54,7 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 The launched CE has the same rights as the server. If you run an elevated CE with the bridge enabled, any process of
 your user can drive it through the mailbox with admin rights on the attached process; for that case `{$lua}` /
 `luaCall` in auto assembler scripts is refused, since it would run Lua in elevated CE.
+
+## License
+
+GPL v3 or later, see [LICENSE](LICENSE). Cheat Engine itself is not included; it is copied from your own install.

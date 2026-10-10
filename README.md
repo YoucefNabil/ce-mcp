@@ -11,10 +11,8 @@ Engine*`, or the folder in `CE_MCP_SOURCE`); it is not part of this repo. When a
 the server copies `ce_mcp_bridge.lua` into `ce/autorun/` and starts `ce/cheatengine-x86_64.exe` **non-elevated**
 (`__COMPAT_LAYER=RunAsInvoker`, so no UAC prompt) on a **Windows desktop of its own** (`CreateDesktop`), so its splash
 screen and windows never appear on yours, with `CE_MCP_PARENT` set to its own PID. The bridge enables itself and
-closes CE (after removing its breakpoints) when the server process is gone. Nothing to start by hand.
-
-To watch CE work, set `CE_MCP_VISIBLE=1` in the server's environment: CE then starts minimized on your desktop
-(its splash shows briefly) and `window(show=True)` brings it up.
+closes CE (after removing its breakpoints) when the server process is gone. Nothing to start by hand, nothing on
+screen, and the focus never moves.
 
 Requests go through a file mailbox in `%LOCALAPPDATA%\ce-mcp` (`req` / `resp`, written via rename), which also works
 with an elevated CE started by hand (an elevated process's named pipe would be read-only for the server). For that
@@ -60,7 +58,11 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 | `disasm(addr, count, before)` | Disassembly with `module+offset` names. |
 | `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. Enabling again without a script reuses the last one. Patches stay in the target when CE closes. |
 | `restart()` | Replace a launched CE that stopped answering (its breakpoints are removed first if it still can). |
-| `window(show)` | Show or hide the CE window. |
+
+## Tests
+
+`python tests/run.py` needs Cheat Engine installed (it starts real CEs on the hidden desktop against a small test
+target); `python tests/run.py --offline` runs only the mailbox checks against a fake bridge.
 
 ## Safety
 

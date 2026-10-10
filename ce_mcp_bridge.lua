@@ -349,11 +349,6 @@ function cmd.aa(r)
   return 'disabled ' .. nm
 end
 
-function cmd.window(r)
-  if r.show == '1' then unhideMainCEwindow() else hideAllCEWindows() end
-  return r.show == '1' and 'shown' or 'hidden'
-end
-
 ---------------------------------------------------------------- mailbox
 
 local function respond(id, ok, text)
@@ -406,7 +401,6 @@ menu.add(toggle)
 local parent = tonumber(os.getenv('CE_MCP_PARENT') or '')
 if parent then
   set_enabled(true)
-  createTimer(300, function() hideAllCEWindows() end)
   -- close with the MCP server, removing our breakpoints first so the game is left clean
   local watchdog = createTimer(nil, true)
   watchdog.Interval = 3000

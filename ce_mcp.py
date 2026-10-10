@@ -103,20 +103,19 @@ def _prune_mailboxes():
 
 def launch_ce():
     """Start the private CE copy without UAC (RunAsInvoker), tied to this server's lifetime, on a desktop of
-    its own so its splash and windows never appear on screen (CE_MCP_VISIBLE=1: normal desktop, minimized)."""
+    its own so its splash and windows never appear on screen and it never takes the focus."""
     if not os.path.exists(CE_EXE):
         provision_ce()
     shutil.copyfile(BRIDGE, os.path.join(CE_DIR, 'autorun', 'ce_mcp_bridge.lua'))
     _prune_mailboxes()
     env = dict(os.environ, __COMPAT_LAYER='RunAsInvoker', CE_MCP_PARENT=str(os.getpid()), CE_MCP_MAILBOX=DIR)
     block = ''.join(f'{k}={v}\0' for k, v in sorted(env.items())) + '\0'
-    si = _SI(cb=ctypes.sizeof(_SI), dwFlags=1, wShowWindow=7)  # STARTF_USESHOWWINDOW, SW_SHOWMINNOACTIVE
-    if os.environ.get('CE_MCP_VISIBLE') != '1':
-        if not _ce.get('desktop'):  # the handle stays open for the server's lifetime
-            _ce['desktop'] = _u32.CreateDesktopW(DESKTOP, None, None, 0, 0x10000000, None)  # GENERIC_ALL
-            if not _ce['desktop']:
-                raise RuntimeError(f'CreateDesktop failed (error {ctypes.get_last_error()})')
-        si.lpDesktop = DESKTOP
+    if not _ce.get('desktop'):  # the handle stays open for the server's lifetime
+        _ce['desktop'] = _u32.CreateDesktopW(DESKTOP, None, None, 0, 0x10000000, None)  # GENERIC_ALL
+        if not _ce['desktop']:
+            raise RuntimeError(f'CreateDesktop failed (error {ctypes.get_last_error()})')
+    si = _SI(cb=ctypes.sizeof(_SI), lpDesktop=DESKTOP,
+             dwFlags=1, wShowWindow=7)  # STARTF_USESHOWWINDOW, SW_SHOWMINNOACTIVE
     pi = _PI()
     cmdline = ctypes.create_unicode_buffer(f'"{CE_EXE}"')
     if not _k32.CreateProcessW(CE_EXE, cmdline, None, None, False, 0x400,  # CREATE_UNICODE_ENVIRONMENT
@@ -328,9 +327,11 @@ def scan(value: str = '?', type: str = 'u32', module: str = '', start: str = '',
     if opt != 'unknown':
         v1 = _num(v1, type)
         v2 = _num(v2, type) if v2 else ''
-    return call('scan', type=type, option=opt, v1=v1, v2=v2, module=module, start=A(start) if start else '',
-                stop=A(end) if end else '', prot='+W*X*C' if writable_only else '*W*X*C',
-                align=struct.calcsize(FMT[type]) if type in FMT else 1, show=show)
+    out = call('scan', type=type, option=opt, v1=v1, v2=v2, module=module, start=A(start) if start else '',
+               stop=A(end) if end else '', prot='+W*X*C' if writable_only else '*W*X*C',
+               align=struct.calcsize(FMT[type]) if type in FMT else 1, show=show)
+    _ce['scan_type'] = type
+    return out
 
 
 @mcp.tool()
@@ -348,8 +349,8 @@ def scan_next(condition: str, show: int = 20) -> str:
         opt, v1, v2 = _first(c)
         if opt == 'unknown':
             raise ValueError('empty condition')
-    conv = lambda x: str(int(x, 0)) if re.fullmatch(r'-?(0x[0-9a-fA-F]+|\d+)', x.strip()) else x.strip()
-    return call('next', option=opt, v1=conv(v1) if v1 else '', v2=conv(v2) if v2 else '', show=show)
+    t = _ce.get('scan_type', 'u32')
+    return call('next', option=opt, v1=_num(v1, t) if v1 else '', v2=_num(v2, t) if v2 else '', show=show)
 
 
 @mcp.tool()
@@ -432,16 +433,6 @@ def restart() -> str:
         _remove(REQ)
         _remove(RESP)
         return _call('status', 60, {})
-
-
-@mcp.tool()
-def window(show: bool = True) -> str:
-    """Show or hide the Cheat Engine window. The CE that ce-mcp starts lives on its own invisible desktop,
-    so this only matters with CE_MCP_VISIBLE=1 or a CE started by hand."""
-    out = call('window', show=show)
-    if os.environ.get('CE_MCP_VISIBLE') != '1' and _ce['proc']:
-        out += ' (on the hidden ce-mcp desktop: set CE_MCP_VISIBLE=1 for the server to see it)'
-    return out
 
 
 if __name__ == '__main__':

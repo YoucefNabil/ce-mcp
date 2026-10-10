@@ -11,7 +11,8 @@
 -- When CE is started by hand, the bridge polls only if %LOCALAPPDATA%\ce-mcp\enabled exists; the "ce-mcp"
 -- main menu toggles it. Lua inside auto assembler scripts is refused (see the README's Safety section).
 
-local VERSION = 2  -- must match BRIDGE_VERSION in ce_mcp.py
+local VERSION = 3  -- must match BRIDGE_VERSION in ce_mcp.py
+local PARENT = tonumber(os.getenv('CE_MCP_PARENT') or '')  -- set when ce-mcp started this CE
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
 -- a CE started by ce-mcp serves that server's own mailbox; one started by hand serves the shared one
 local BOX = os.getenv('CE_MCP_MAILBOX') or DIR
@@ -220,13 +221,31 @@ end
 local REGS = { 'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
                'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15' }
 
-local function regs()
+local function regs(stack)
   local o = {}
   for i, n in ipairs(REGS) do
     local v = _G[n]
     o[i] = string.format('%s=%X', n, v or 0)
   end
-  return table.concat(o, ' ')
+  local s = table.concat(o, ' ')
+  if stack then
+    -- [RSP] is the return address only at a function's first instruction; deeper slots often hold callers
+    local q = {}
+    for i = 0, 5 do
+      local v = readQword(RSP + 8 * i)
+      q[#q + 1] = v and name(v) or '?'
+    end
+    s = s .. '\n    stack: ' .. table.concat(q, ' ')
+  end
+  return s
+end
+
+local function active_bps()
+  local n = 0
+  for _, rec in pairs(bps) do
+    if not rec.stopped then n = n + 1 end
+  end
+  return n
 end
 
 function cmd.bp_set(r)
@@ -236,32 +255,40 @@ function cmd.bp_set(r)
   if not trig then fail('kind must be write, access or execute') end
   if trig == bptExecute then size = 1 end
   if bps[a] then fail(string.format('breakpoint already set at %X (bp_clear first)', a)) end
-  local n = 0
-  for _ in pairs(bps) do n = n + 1 end
-  if n >= 4 then fail('all 4 hardware breakpoints are in use (bp_clear one first)') end
+  if active_bps() >= 4 then fail('all 4 hardware breakpoints are in use (bp_clear one first)') end
   if not debug_isDebugging() then
     debugProcess(tonumber(r.debugger) or 0)
     if not debug_isDebugging() then fail('could not start the debugger') end
   end
-  local rec = { kind = kind, size = size, total = 0, hits = {}, order = {} }
+  local rec = { kind = kind, size = size, total = 0, hits = {}, order = {},
+                stack = r.stack == '1', max = tonumber(r.max_hits) or 0 }
   bps[a] = rec
   debug_setBreakpoint(a, size, trig, bpmDebugRegister, function()
+    if rec.stopped then
+      debug_continueFromBreakpoint(co_run)
+      return 1
+    end
     -- data breakpoints trap after the instruction ran, so report the one before RIP
     local ip = (trig == bptExecute) and RIP or getPreviousOpcode(RIP)
     rec.total = rec.total + 1
     local h = rec.hits[ip]
     if not h and #rec.order < 64 then
-      h = { n = 0, first = regs() }
+      h = { n = 0, first = regs(rec.stack) }
       rec.hits[ip] = h
       rec.order[#rec.order + 1] = ip
     end
     if h then
       h.n = h.n + 1
-      if h.n > 1 then h.last = regs() end
+      if h.n > 1 then h.last = regs(rec.stack) end
       if trig ~= bptExecute then
         local v = readBytes(a, size, true)
         h.value = v and hexbytes(v, ' ') or '?'
       end
+    end
+    if rec.max > 0 and rec.total >= rec.max then
+      -- keep the hits, free the debug register once this handler has returned
+      rec.stopped = true
+      createTimer(1, function() debug_removeBreakpoint(a) end)
     end
     debug_continueFromBreakpoint(co_run)
     return 1
@@ -270,8 +297,8 @@ function cmd.bp_set(r)
 end
 
 local function hits_text(a, rec)
-  local out = { string.format('%s %s size %d: %d hit(s), %d instruction(s)', rec.kind, name(a), rec.size,
-    rec.total, #rec.order) }
+  local out = { string.format('%s %s size %d: %d hit(s), %d instruction(s)%s', rec.kind, name(a), rec.size,
+    rec.total, #rec.order, rec.stopped and ', stopped at max_hits' or '') }
   for _, ip in ipairs(rec.order) do
     local h = rec.hits[ip]
     local d = disassemble(ip)
@@ -296,7 +323,7 @@ function cmd.bp_clear(r)
   local n = 0
   for a in pairs(bps) do
     if not r.addr or r.addr == '' or a == addr(r.addr) then
-      debug_removeBreakpoint(a)
+      if not bps[a].stopped then debug_removeBreakpoint(a) end
       bps[a] = nil
       n = n + 1
     end
@@ -349,6 +376,41 @@ function cmd.aa(r)
   return 'disabled ' .. nm
 end
 
+---------------------------------------------------------------- lua
+
+local LUA_MAX = 20000  -- characters of output
+
+-- Runs `code` with CE's whole Lua API; returns what it printed, then its return values.
+-- Only in the CE ce-mcp started: that one is not elevated, so this gives no more than the caller already has.
+function cmd.lua(r)
+  if not PARENT then fail('lua() only runs in the Cheat Engine that ce-mcp starts, not in one started by hand') end
+  local chunk, err = load(r.code or '', '=lua', 't')
+  if not chunk then fail(err) end
+  local out = {}
+  local function emit(...)
+    local t = table.pack(...)
+    for i = 1, t.n do t[i] = tostring(t[i]) end
+    out[#out + 1] = table.concat(t, '\t', 1, t.n)
+  end
+  -- pure-Lua loops are stopped at the deadline; a blocking CE call is not (restart() covers that)
+  local deadline = getTickCount() + (tonumber(r.limit) or 10) * 1000
+  local saved_print = print
+  print = emit
+  debug.sethook(function() if getTickCount() > deadline then error('lua() timed out', 0) end end, '', 10000)
+  local res = table.pack(pcall(chunk))
+  debug.sethook()
+  print = saved_print
+  local text = table.concat(out, '\n')
+  if not res[1] then fail((text ~= '' and text .. '\n' or '') .. 'error: ' .. tostring(res[2])) end
+  if res.n > 1 then
+    local ret = {}
+    for i = 2, res.n do ret[#ret + 1] = tostring(res[i]) end
+    text = text .. (text ~= '' and '\n' or '') .. table.concat(ret, '\t')
+  end
+  if #text > LUA_MAX then text = text:sub(1, LUA_MAX) .. '\n... (truncated)' end
+  return text
+end
+
 ---------------------------------------------------------------- mailbox
 
 local function respond(id, ok, text)
@@ -398,14 +460,13 @@ toggle.Caption = 'Toggle bridge'
 toggle.OnClick = function() set_enabled(not timer.Enabled) end
 menu.add(toggle)
 
-local parent = tonumber(os.getenv('CE_MCP_PARENT') or '')
-if parent then
+if PARENT then
   set_enabled(true)
   -- close with the MCP server, removing our breakpoints first so the game is left clean
   local watchdog = createTimer(nil, true)
   watchdog.Interval = 3000
   watchdog.OnTimer = function()
-    if (getProcesslist() or {})[parent] then return end
+    if (getProcesslist() or {})[PARENT] then return end
     watchdog.Enabled = false
     pcall(cmd.bp_clear, {})
     closeCE()

@@ -22,7 +22,7 @@ ROOT = os.path.join(os.environ['LOCALAPPDATA'], 'ce-mcp')
 SHARED = os.path.exists(os.path.join(ROOT, 'enabled'))
 DIR = ROOT if SHARED else os.path.join(ROOT, str(os.getpid()))
 REQ, RESP = os.path.join(DIR, 'req'), os.path.join(DIR, 'resp')
-BRIDGE_VERSION = 2  # must match VERSION in ce_mcp_bridge.lua
+BRIDGE_VERSION = 3  # must match VERSION in ce_mcp_bridge.lua
 FMT = {'u8': '<B', 's8': '<b', 'u16': '<H', 's16': '<h', 'u32': '<I', 's32': '<i',
        'u64': '<Q', 's64': '<q', 'f32': '<f', 'f64': '<d', 'ptr': '<Q'}
 _seq = itertools.count(int(time.time() * 1000) % 1_000_000_000)
@@ -232,7 +232,8 @@ mcp = FastMCP('ce-mcp', instructions=(
     'Drive a running Cheat Engine (scans, memory, hardware breakpoints, disassembly, auto assembler) '
     'through its Lua bridge. Attach first. Typical flow: scan -> scan_next until few results -> '
     'find_writers(addr) while the user triggers the change in game -> disasm around the instruction -> '
-    'aa(name, script) to test a patch.'))
+    'aa(name, script) to test a patch. For anything the tools do not cover, such as walking engine structures '
+    'or many reads at once, lua(code) runs Lua with CE\'s whole API in one call.'))
 
 
 @mcp.tool()
@@ -366,12 +367,16 @@ def aob_scan(pattern: str, module: str = '', show: int = 20) -> str:
 
 
 @mcp.tool()
-def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2) -> str:
+def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, stack: bool = False,
+           max_hits: int = 0) -> str:
     """Hardware breakpoint that logs and continues (max 4). kind: write / access (data, size 1/2/4/8)
     or execute (code). Hits are grouped by instruction with registers of the first and last hit.
-    debugger: 2 = VEH (default; the game survives CE closing), 1 = Windows, 0 = CE's setting.
+    stack=True also logs the 6 qwords at RSP as module+offset where they point into code (callers; [RSP]
+    is the return address only at a function's first instruction). max_hits > 0 stops the breakpoint
+    after that many hits and keeps what it caught, for addresses hit every frame (each hit slows the
+    game). debugger: 2 = VEH (default; the game survives CE closing), 1 = Windows, 0 = CE's setting.
     Only used when the debugger is not running yet."""
-    return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger)
+    return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger, stack=stack, max_hits=max_hits)
 
 
 @mcp.tool()
@@ -390,11 +395,11 @@ def bp_clear(addr: str = '') -> str:
 
 
 @mcp.tool()
-def find_writers(addr: str, seconds: float = 10, size: int = 4, kind: str = 'write') -> str:
+def find_writers(addr: str, seconds: float = 10, size: int = 4, kind: str = 'write', stack: bool = False) -> str:
     """'Find out what writes/accesses this address': breakpoint for `seconds` (the user triggers the
-    change in game meanwhile), then report the instructions and remove the breakpoint."""
+    change in game meanwhile), then report the instructions and remove the breakpoint. stack as in bp_set."""
     a = A(addr)
-    call('bp_set', addr=a, kind=kind, size=size, debugger=2)
+    call('bp_set', addr=a, kind=kind, size=size, debugger=2, stack=stack)
     try:
         time.sleep(seconds)
         return call('bp_hits', addr=a)
@@ -414,6 +419,17 @@ def aa(name: str, script: str = '', enable: bool = True) -> str:
     under `name`; without a script it re-enables the last one given for `name`. enable=False runs the
     [DISABLE] part of the remembered script. Patches stay in the target when CE closes. {$lua} is refused."""
     return call('aa', name=name, script=script if enable else '', enable=enable)
+
+
+@mcp.tool()
+def lua(code: str, timeout: float = 10) -> str:
+    """Run Lua in Cheat Engine with its whole API (readQword, readString, getAddress, disassemble,
+    AOBScan, ...): returns what the code printed, then its return values (tostring'd, max 20000 chars).
+    Use it to walk structures or batch reads in one call. Only in the CE that ce-mcp starts (not
+    elevated). Lua loops stop after `timeout` seconds; a blocking CE call does not (use restart())."""
+    if SHARED:
+        raise RuntimeError('lua() only runs in the Cheat Engine that ce-mcp starts, not in one started by hand')
+    return call('lua', timeout=timeout + 30, code=code, limit=timeout)
 
 
 @mcp.tool()

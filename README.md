@@ -53,8 +53,9 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 | `scan_next(condition)` | `5`, `>5`, `<5`, `1..8`, `increased`, `decreased`, `changed`, `unchanged`, `+=N`, `-=N`. |
 | `results(offset, show)` | Page through results. |
 | `aob_scan(pattern, module)` | Byte pattern search, separate from the main scan. |
-| `bp_set(addr, kind, size)` / `bp_hits` / `bp_clear` | Logging hardware breakpoints (write / access / execute, max 4). Hits grouped by instruction with registers of first and last hit and the value after a write. |
-| `find_writers(addr, seconds)` | bp_set + wait + report + clear: CE's "find out what writes this address". |
+| `bp_set(addr, kind, size, stack, max_hits)` / `bp_hits` / `bp_clear` | Logging hardware breakpoints (write / access / execute, max 4). Hits grouped by instruction with registers of first and last hit and the value after a write. `stack=True` adds the qwords at RSP (callers, as `module+offset`); `max_hits` stops a breakpoint on a hot address and keeps its hits. |
+| `find_writers(addr, seconds, stack)` | bp_set + wait + report + clear: CE's "find out what writes this address". |
+| `lua(code, timeout)` | Lua with CE's whole API, one call: walk structures, batch reads, anything the tools don't cover. Returns what it printed and returned. Only in the CE ce-mcp starts. |
 | `disasm(addr, count, before)` | Disassembly with `module+offset` names. |
 | `aa(name, script, enable)` | Run an auto assembler script ([ENABLE] part), and later its [DISABLE] part. Enabling again without a script reuses the last one. Patches stay in the target when CE closes. |
 | `restart()` | Replace a launched CE that stopped answering (its breakpoints are removed first if it still can). |
@@ -67,7 +68,7 @@ target); `python tests/run.py --offline` runs only the mailbox checks against a 
 ## Safety
 
 The launched CE runs non-elevated with the same rights as the server, so the mailbox gives no process more than it
-already has.
+already has; that is why `lua()` is allowed there and refused in a CE started by hand.
 
 An **elevated** CE started by hand with the bridge enabled is different: any process of your user can then drive it
 through the mailbox, with admin rights on whatever process it has attached. That is effectively admin access. The

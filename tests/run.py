@@ -66,6 +66,7 @@ def offline():
         c._ce['proc'], c.SHARED = None, True
         check('shared mode never launches CE', lambda: c.call('status'),
               lambda o: 'started by hand' in o and c._ce['proc'] is None)
+        check('lua refused in shared mode', lambda: c.lua('return 1'), lambda o: 'started by hand' in o)
     finally:
         c.DIR, c.REQ, c.RESP, c.SHARED, c._ce['proc'] = saved
 
@@ -141,6 +142,25 @@ def online():
               lambda o: o == '11 22')
         check('aa disable again', lambda: c.aa('t', enable=False), lambda o: o == 'disabled t')
         check('aa refuses Lua', lambda: c.aa('bad', '{$lua}\nprint(1)\n{$asm}\n'), lambda o: 'not allowed' in o)
+
+        check('lua return value', lambda: c.lua('return 1 + 1'), lambda o: o == '2')
+        check('lua print then return', lambda: c.lua('print("a") print("b", 2) return 3'),
+              lambda o: o == 'a\nb\t2\n3')
+        check('lua reads the target', lambda: c.lua(f'return readInteger({addr})'),
+              lambda o: o.isdigit() and abs(int(o) - int(c.read(addr).split()[0])) <= 1)  # it ticks every second
+        check('lua error', lambda: c.lua('print("before") error("boom")'),
+              lambda o: 'before' in o and 'boom' in o)
+        check('lua loop stops at the timeout', lambda: c.lua('while true do end', timeout=1),
+              lambda o: 'timed out' in o)
+        check('CE fine after the timeout, print restored', lambda: c.lua('print("x")'), lambda o: o == 'x')
+
+        check('bp with stack', lambda: (c.bp_set(addr, stack=True), time.sleep(2.5), c.bp_hits(addr, clear=True))[2],
+              lambda o: 'stack: ' in o and '+' in o.split('stack: ')[1].split('\n')[0])
+        check('bp max_hits', lambda: (c.bp_set(addr, max_hits=2), time.sleep(4), c.bp_hits(addr))[2],
+              lambda o: ' 2 hit(s)' in o and 'stopped at max_hits' in o)
+        check('stopped bp frees its slot', lambda: [c.bp_set(hex(base + 8 + 8 * i)) for i in range(4)][-1],
+              lambda o: 'breakpoint on' in o)
+        check('bp_clear (stopped one included)', c.bp_clear, lambda o: 'removed 5' in o)
 
         for i in range(4):
             check(f'bp {i + 1} of 4', lambda i=i: c.bp_set(hex(base + 8 * i)), lambda o: 'breakpoint on' in o)

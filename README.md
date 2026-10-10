@@ -19,7 +19,11 @@ To watch CE work, set `CE_MCP_VISIBLE=1` in the server's environment: CE then st
 Requests go through a file mailbox in `%LOCALAPPDATA%\ce-mcp` (`req` / `resp`, written via rename), which also works
 with an elevated CE started by hand (an elevated process's named pipe would be read-only for the server). For that
 case copy the bridge into that CE's `autorun` folder; it polls only if `%LOCALAPPDATA%\ce-mcp\enabled` exists, and the
-**ce-mcp** main-menu entry toggles it. Commands are serialized; one client.
+**ce-mcp** main-menu entry toggles it.
+
+Each server has its own mailbox (`%LOCALAPPDATA%\ce-mcp\<server pid>`) and its own CE, so several sessions can run
+at once; mailboxes of servers that are gone are removed at the next launch. With the `enabled` file present, servers
+use the shared mailbox of the hand-started CE instead.
 
 ## Install
 

@@ -17,7 +17,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CE_DIR = os.path.join(HERE, 'ce')
 CE_EXE = os.path.join(CE_DIR, 'cheatengine-x86_64.exe')
 BRIDGE = os.path.join(HERE, 'ce_mcp_bridge.lua')
-DIR = os.path.join(os.environ['LOCALAPPDATA'], 'ce-mcp')
+ROOT = os.path.join(os.environ['LOCALAPPDATA'], 'ce-mcp')
+# Each server gets its own mailbox and CE, so concurrent sessions never take each other's requests.
+# With ROOT\enabled present, a CE started by hand serves the shared ROOT mailbox instead.
+DIR = ROOT if os.path.exists(os.path.join(ROOT, 'enabled')) else os.path.join(ROOT, str(os.getpid()))
 REQ, RESP = os.path.join(DIR, 'req'), os.path.join(DIR, 'resp')
 FMT = {'u8': '<B', 's8': '<b', 'u16': '<H', 's16': '<h', 'u32': '<I', 's32': '<i',
        'u64': '<Q', 's64': '<q', 'f32': '<f', 'f64': '<d', 'ptr': '<Q'}
@@ -57,6 +60,9 @@ _u32.CreateDesktopW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, ctypes.c_void_p, wt.DWOR
 _k32.CreateProcessW.argtypes = [wt.LPCWSTR, wt.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wt.BOOL, wt.DWORD,
                                 ctypes.c_void_p, wt.LPCWSTR, ctypes.POINTER(_SI), ctypes.POINTER(_PI)]
 _k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+_k32.OpenProcess.restype = wt.HANDLE
+_k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+_k32.CloseHandle.argtypes = [wt.HANDLE]
 DESKTOP = 'ce-mcp'
 
 
@@ -72,6 +78,21 @@ class _Proc:
         return None if code.value == 259 else code.value  # STILL_ACTIVE
 
 
+def _prune_mailboxes():
+    """Remove the mailboxes of servers that are no longer running."""
+    for name in os.listdir(ROOT) if os.path.isdir(ROOT) else []:
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        h = _k32.OpenProcess(0x1000, False, int(name))  # PROCESS_QUERY_LIMITED_INFORMATION
+        alive = False
+        if h:
+            code = wt.DWORD()
+            alive = bool(_k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259
+            _k32.CloseHandle(h)
+        if not alive:
+            shutil.rmtree(os.path.join(ROOT, name), ignore_errors=True)
+
+
 def launch_ce():
     """Start the private CE copy without UAC (RunAsInvoker), tied to this server's lifetime, on a desktop of
     its own so its splash and windows never appear on screen (CE_MCP_VISIBLE=1: normal desktop, minimized)."""
@@ -80,7 +101,8 @@ def launch_ce():
     if not os.path.exists(CE_EXE):
         provision_ce()
     shutil.copyfile(BRIDGE, os.path.join(CE_DIR, 'autorun', 'ce_mcp_bridge.lua'))
-    env = dict(os.environ, __COMPAT_LAYER='RunAsInvoker', CE_MCP_PARENT=str(os.getpid()))
+    _prune_mailboxes()
+    env = dict(os.environ, __COMPAT_LAYER='RunAsInvoker', CE_MCP_PARENT=str(os.getpid()), CE_MCP_MAILBOX=DIR)
     block = ''.join(f'{k}={v}\0' for k, v in sorted(env.items())) + '\0'
     si = _SI(cb=ctypes.sizeof(_SI), dwFlags=1, wShowWindow=7)  # STARTF_USESHOWWINDOW, SW_SHOWMINNOACTIVE
     if os.environ.get('CE_MCP_VISIBLE') != '1':

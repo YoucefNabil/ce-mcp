@@ -13,7 +13,9 @@
 -- run with more rights than the caller.
 
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
-local REQ, RESP, RESP_TMP = DIR .. '\\req', DIR .. '\\resp', DIR .. '\\resp.tmp'
+-- a CE started by ce-mcp serves that server's own mailbox; one started by hand serves the shared one
+local BOX = os.getenv('CE_MCP_MAILBOX') or DIR
+local REQ, RESP, RESP_TMP = BOX .. '\\req', BOX .. '\\resp', BOX .. '\\resp.tmp'
 
 local function unhex(s)
   return (s:gsub('%x%x', function(h) return string.char(tonumber(h, 16)) end))

@@ -240,6 +240,66 @@ def online():
         tgt.kill()
 
 
+def build_target32():
+    """tests/build/target32.exe, built with MSVC's x86 tools when missing or older than its source.
+    Returns the path, or a reason it couldn't be built."""
+    src = os.path.join(HERE, 'target32.c')
+    exe = os.path.join(HERE, 'build', 'target32.exe')
+    if os.path.exists(exe) and os.path.getmtime(exe) >= os.path.getmtime(src):
+        return exe
+    vswhere = os.path.expandvars(r'%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe')
+    if not os.path.exists(vswhere):
+        return 'no Visual Studio (vswhere.exe not found)'
+    vs = subprocess.run([vswhere, '-latest', '-products', '*', '-property', 'installationPath'],
+                        capture_output=True, text=True).stdout.strip()
+    vcvars = os.path.join(vs, r'VC\Auxiliary\Build\vcvars32.bat')
+    if not vs or not os.path.exists(vcvars):
+        return 'no MSVC x86 tools (vcvars32.bat not found)'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    # runs in the build folder, so the .obj lands there too
+    r = subprocess.run(f'call "{vcvars}" >nul && cl /nologo /O1 "{src}" /Fe"{exe}"',
+                       shell=True, capture_output=True, text=True, cwd=os.path.dirname(exe))
+    return exe if r.returncode == 0 and os.path.exists(exe) else f'build failed: {(r.stdout + r.stderr)[-300:]}'
+
+
+def online32():
+    """Breakpoints in a 32-bit process, where CE names the registers EAX..ESP/EIP."""
+    exe = build_target32()
+    if not os.path.exists(exe):
+        print(f'SKIP 32-bit target: {exe}')
+        return
+    tgt = subprocess.Popen([exe, '120'], stdout=subprocess.PIPE, text=True)
+    addr = tgt.stdout.readline().strip()
+    try:
+        check('attach a 32-bit process', lambda: c.attach(str(tgt.pid)), lambda o: '(32-bit)' in o)
+        check('32-bit read u32', lambda: c.read(addr), lambda o: o.split()[0].isdigit())
+        check('32-bit bp shows E registers', lambda: (c.bp_set(addr, max_hits=1), time.sleep(2.5),
+                                                       c.bp_hits(addr, clear=True))[2],
+              lambda o: 'EAX=' in o and 'ESP=' in o and 'RAX=' not in o)
+        check('32-bit bp with stack', lambda: (c.bp_set(addr, stack=True, max_hits=1), time.sleep(2.5),
+                                                c.bp_hits(addr, clear=True))[2],
+              lambda o: 'stack: ' in o and 'target32.exe+' in o.split('stack: ')[1].split(NL)[0])
+        check('32-bit where on EIP and memory', lambda: (c.bp_set(addr, where=f'EIP != 0 && [{addr}]:4 != 0',
+                                                                  max_hits=2), time.sleep(3.5),
+                                                         c.bp_hits(addr, clear=True))[2],
+              lambda o: ' 2 hit(s)' in o and 'skipped' not in o)
+        check('32-bit R names alias the E registers', lambda: (c.bp_set(addr, where='RIP != 0 && RSP != 0',
+                                                                        max_hits=2), time.sleep(3.5),
+                                                                c.bp_hits(addr, clear=True))[2],
+              lambda o: ' 2 hit(s)' in o and 'skipped' not in o)
+        check('32-bit collect on [ESP]', lambda: (c.bp_set(addr, collect='EIP, [ESP]:4', max_hits=3), time.sleep(4.5),
+                                                   c.bp_hits(addr, clear=True))[2],
+              lambda o: 'EIP: ' in o and ' x3' in o.split('EIP: ')[1].split(NL)[0] and '[ESP]:4: ' in o)
+        log_file = os.path.join(tempfile.gettempdir(), 'ce_mcp_log32.tsv')
+        check('32-bit bp log', lambda: (c.bp_set(addr, log=f'EIP, ESP, [{addr}]:4'), time.sleep(3.5),
+                                        c.bp_hits(addr, clear=True, log_file=log_file))[2],
+              lambda o: 'written to' in o and open(log_file).read().count(NL) >= 3
+              and open(log_file).readline().startswith('ms\tEIP\tESP'))
+        check('no bp left (32-bit)', c.bp_clear, lambda o: 'removed 0' in o)
+    finally:
+        tgt.kill()
+
+
 def two_servers():
     """Two servers at once, each with its own mailbox and CE, each reading its own target."""
     kids = [subprocess.Popen([sys.executable, __file__, '--child', str(tag)], stdout=subprocess.PIPE, text=True)
@@ -296,6 +356,7 @@ if __name__ == '__main__':
     offline()
     if '--offline' not in sys.argv:
         online()
+        online32()
         two_servers()
         orphan()
     print(f'\n{len(passed)} passed, {len(failed)} failed' + (f': {", ".join(failed)}' if failed else ''))

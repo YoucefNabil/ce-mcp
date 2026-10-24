@@ -63,7 +63,8 @@ Addresses are whatever CE resolves: hex (`0x` optional), `Game.exe+1234`, symbol
 ## Tests
 
 `python tests/run.py` needs Cheat Engine installed (it starts real CEs on the hidden desktop against a small test
-target); `python tests/run.py --offline` runs only the mailbox checks against a fake bridge.
+target); `python tests/run.py --offline` runs only the mailbox checks against a fake bridge. The 32-bit breakpoint
+checks build `tests/target32.c` with Visual Studio's x86 tools on first use and are skipped when those aren't installed.
 
 ## Safety
 

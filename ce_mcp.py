@@ -414,8 +414,9 @@ def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, sta
     after that many hits and keeps what it caught, for addresses hit every frame (each hit slows the
     game). debugger: 2 = VEH (default; the game survives CE closing), 1 = Windows, 0 = CE's setting.
     Only used when the debugger is not running yet.
-    Operands below: a number, a register (RAX..R15, RIP) or memory [REG], [REG+0x10], [REG-8], [0x1234]
-    with an optional :size in bytes (default 8, little-endian), all read at the moment of the hit.
+    Operands below: a number, a register (RAX..R15, RIP; in a 32-bit target EAX..ESP, EIP, and the R names
+    map to them) or memory [REG], [REG+0x10], [REG-8], [0x1234] with an optional :size in bytes (default 8,
+    little-endian), all read at the moment of the hit. stack= reads dwords at ESP in a 32-bit target.
     where: only count hits where all comparisons hold, e.g. 'RAX==0x35FC5F20 && [RBP+0x30]:4!=0'
     (==, !=, <, >, <=, >=; < and > unsigned). Skipped hits are counted apart and don't use up max_hits.
     collect: comma-separated operands whose distinct values are counted per instruction, e.g. 'RAX, [RSP]'.

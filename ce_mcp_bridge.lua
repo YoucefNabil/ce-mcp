@@ -256,10 +256,22 @@ end
 
 ---------------------------------------------------------------- breakpoints
 
-local REGS = { 'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
-               'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15' }
-local REGSET = { RIP = true }
-for _, n in ipairs(REGS) do REGSET[n] = true end
+local REGS64 = { 'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
+                 'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15' }
+local REGS32 = { 'EAX', 'EBX', 'ECX', 'EDX', 'ESI', 'EDI', 'EBP', 'ESP' }
+local REGSET = { RIP = true, EIP = true }
+for _, n in ipairs(REGS64) do REGSET[n] = true end
+for _, n in ipairs(REGS32) do REGSET[n] = true end
+
+-- CE names the registers after the target: RAX..R15/RIP in a 64-bit process, EAX..ESP/EIP in a 32-bit one.
+-- Operands may use either spelling; R8..R15 read nil in a 32-bit process.
+local TO32, TO64 = { RIP = 'EIP' }, { EIP = 'RIP' }
+for i, n in ipairs(REGS32) do TO32[REGS64[i]] = n; TO64[n] = REGS64[i] end
+
+local function regval(n)
+  if targetIs64Bit() then return _G[TO64[n] or n] end
+  return _G[TO32[n] or n]
+end
 
 -- An operand of where/collect/capture: a number, a register, or memory [REG], [REG+off], [REG-off] or
 -- [address], with an optional :size in bytes (default 8, read little-endian; capture dumps longer ones).
@@ -271,7 +283,7 @@ local function operand(text, maxsize)
     if REGSET[u] then return { text = u, reg = u } end
     local v = tonumber(s)
     if math.type(v) == 'integer' then return { text = s, num = v } end
-    fail('bad operand "' .. text .. '": use a number, a register (RAX..R15, RIP) or [REG+offset]:size')
+    fail('bad operand "' .. text .. '": use a number, a register (RAX..R15, RIP; EAX..ESP, EIP) or [REG+offset]:size')
   end
   local size = sz == '' and 8 or tonumber(sz)
   if math.type(size) ~= 'integer' or size < 1 or size > maxsize then
@@ -301,8 +313,10 @@ end
 -- than 8 bytes, or nil when the memory can't be read.
 local function value(o)
   if o.num then return o.num end
-  if not o.size then return _G[o.reg] end
-  local b = readBytes((o.reg and _G[o.reg] or o.addr) + o.off, o.size, true)
+  if not o.size then return regval(o.reg) end
+  local base = o.reg and regval(o.reg) or o.addr
+  if not base then return nil end
+  local b = readBytes(base + o.off, o.size, true)
   if not b or #b < o.size then return nil end
   if o.size > 8 then return hexbytes(b, ' ') end
   local v = 0
@@ -355,7 +369,8 @@ end
 
 local function regs(rec)
   local o = {}
-  for i, n in ipairs(REGS) do
+  local is64 = targetIs64Bit()
+  for i, n in ipairs(is64 and REGS64 or REGS32) do
     local v = _G[n]
     o[i] = string.format('%s=%X', n, v or 0)
   end
@@ -368,8 +383,9 @@ local function regs(rec)
   if rec.stack then
     -- [RSP] is the return address only at a function's first instruction; deeper slots often hold callers
     local q = {}
+    local sp, w = regval('RSP'), is64 and 8 or 4
     for i = 0, 5 do
-      local v = readQword(RSP + 8 * i)
+      local v = sp and (is64 and readQword(sp + w * i) or readInteger(sp + w * i))
       q[#q + 1] = v and name(v) or '?'
     end
     s = s .. '\n    stack: ' .. table.concat(q, ' ')
@@ -406,7 +422,8 @@ local function on_hit(a, rec, trig)
     return
   end
   -- data breakpoints trap after the instruction ran, so report the one before RIP
-  local ip = (trig == bptExecute) and RIP or getPreviousOpcode(RIP)
+  local pc = regval('RIP')
+  local ip = (trig == bptExecute) and pc or getPreviousOpcode(pc)
   rec.total = rec.total + 1
   local h = rec.hits[ip]
   if not h and #rec.order < 64 then

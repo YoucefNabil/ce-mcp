@@ -12,7 +12,7 @@
 -- When CE is started by hand, the bridge polls only if %LOCALAPPDATA%\ce-mcp\enabled exists; the "ce-mcp"
 -- main menu toggles it. Lua inside auto assembler scripts is refused (see the README's Safety section).
 
-local VERSION = 4  -- must match BRIDGE_VERSION in ce_mcp.py
+local VERSION = 5  -- must match BRIDGE_VERSION in ce_mcp.py
 local PARENT = tonumber(os.getenv('CE_MCP_PARENT') or '')  -- set when ce-mcp started this CE
 local ALIVE = os.getenv('CE_MCP_ALIVE')
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
@@ -378,6 +378,7 @@ local function regs(rec)
 end
 
 local COLLECT_MAX = 32  -- distinct values kept per collected operand and instruction
+local LOG_MAX = 20000   -- rows kept per breakpoint with log=
 
 local function tally(h, rec)
   h.col = h.col or {}
@@ -422,6 +423,11 @@ local function on_hit(a, rec, trig)
     end
     if #rec.collect > 0 then tally(h, rec) end
   end
+  if #rec.log > 0 and #rec.rows < LOG_MAX then
+    local row = { tostring(getTickCount() - rec.t0) }
+    for i, op in ipairs(rec.log) do row[i + 1] = show(value(op)) end
+    rec.rows[#rec.rows + 1] = table.concat(row, '\t')
+  end
   if rec.max > 0 and rec.total >= rec.max then
     -- keep the hits, free the debug register once this handler has returned
     rec.stopped = true
@@ -439,7 +445,8 @@ function cmd.bp_set(r)
   if active_bps() >= 4 then fail('all 4 hardware breakpoints are in use (bp_clear one first)') end
   local rec = { kind = kind, size = size, total = 0, skipped = 0, hits = {}, order = {},
                 pid = getOpenedProcessID(), stack = r.stack == '1', max = tonumber(r.max_hits) or 0,
-                where = conditions(r.where), collect = operands(r.collect, 8), capture = operands(r.capture, 256) }
+                where = conditions(r.where), collect = operands(r.collect, 8), capture = operands(r.capture, 256),
+                log = operands(r.log, 8), rows = {}, t0 = getTickCount() }
   if not debug_isDebugging() then
     debugProcess(tonumber(r.debugger) or 0)
     if not debug_isDebugging() then fail('could not start the debugger') end
@@ -481,10 +488,38 @@ local function hits_text(a, rec)
   return table.concat(out, '\n')
 end
 
+local function log_text(a, rec, file, several)
+  local head = { 'ms' }
+  for i, op in ipairs(rec.log) do head[i + 1] = op.text end
+  local s = string.format('log: %d row(s)%s', #rec.rows, #rec.rows >= LOG_MAX and ' (full)' or '')
+  if file and file ~= '' then
+    if several then
+      local stem, ext = file:match('^(.*)(%.[^%.\\/]*)$')
+      file = string.format('%s_%X%s', stem or file, a, ext or '')
+    end
+    local f = io.open(file, 'w')
+    if not f then return s .. ', could not write ' .. file end
+    f:write(table.concat(head, '\t'), '\n')
+    for _, row in ipairs(rec.rows) do f:write(row, '\n') end
+    f:close()
+    return s .. ' written to ' .. file
+  end
+  local out = { s, '  ' .. table.concat(head, '\t') }
+  for i = 1, math.min(20, #rec.rows) do out[#out + 1] = '  ' .. rec.rows[i] end
+  return table.concat(out, '\n')
+end
+
 function cmd.bp_hits(r)
-  local out = {}
+  local out, n = {}, 0
   for a, rec in pairs(bps) do
-    if not r.addr or r.addr == '' or a == addr(r.addr) then out[#out + 1] = hits_text(a, rec) end
+    if (not r.addr or r.addr == '' or a == addr(r.addr)) and #rec.log > 0 then n = n + 1 end
+  end
+  for a, rec in pairs(bps) do
+    if not r.addr or r.addr == '' or a == addr(r.addr) then
+      local s = hits_text(a, rec)
+      if #rec.log > 0 then s = s .. '\n' .. log_text(a, rec, r.log_file, n > 1) end
+      out[#out + 1] = s
+    end
   end
   if #out == 0 then return 'no breakpoints set by ce-mcp' end
   return table.concat(out, '\n\n')

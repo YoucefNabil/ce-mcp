@@ -202,6 +202,11 @@ def online():
         check('bp capture dumps memory', lambda: (c.bp_set(addr, capture=f'[{addr}]:4, [{addr}]:16'),
                                                    time.sleep(2.5), c.bp_hits(addr, clear=True))[2],
               lambda o: 'capture: ' in o and len(o.split('capture: ')[1].split(NL)[0].split('=')[-1].split()) == 16)
+        log_file = os.path.join(tempfile.gettempdir(), 'ce_mcp_log.tsv')
+        check('bp log records rows in order', lambda: (c.bp_set(addr, log=f'RIP, [{addr}]:4'), time.sleep(3.5),
+                                                       c.bp_hits(addr, clear=True, log_file=log_file))[2],
+              lambda o: 'written to' in o and open(log_file).read().count(NL) >= 3
+              and open(log_file).readline().startswith('ms\tRIP'))
         check('bp bad operand is refused', lambda: c.bp_set(addr, where='RAX=1'), lambda o: 'bad condition' in o)
         check('bp bad size is refused', lambda: c.bp_set(addr, collect='[RAX]:16'), lambda o: 'bad size' in o)
         check('no bp left after refusals', c.bp_clear, lambda o: 'removed 0' in o)

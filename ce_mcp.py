@@ -22,7 +22,7 @@ ROOT = os.path.join(os.environ['LOCALAPPDATA'], 'ce-mcp')
 SHARED = os.path.exists(os.path.join(ROOT, 'enabled'))
 DIR = ROOT if SHARED else os.path.join(ROOT, str(os.getpid()))
 REQ, RESP = os.path.join(DIR, 'req'), os.path.join(DIR, 'resp')
-BRIDGE_VERSION = 4  # must match VERSION in ce_mcp_bridge.lua
+BRIDGE_VERSION = 5  # must match VERSION in ce_mcp_bridge.lua
 FMT = {'u8': '<B', 's8': '<b', 'u16': '<H', 's16': '<h', 'u32': '<I', 's32': '<i',
        'u64': '<Q', 's64': '<q', 'f32': '<f', 'f64': '<d', 'ptr': '<Q'}
 _seq = itertools.count(int(time.time() * 1000) % 1_000_000_000)
@@ -406,7 +406,7 @@ def aob_scan(pattern: str, module: str = '', show: int = 20) -> str:
 
 @mcp.tool(structured_output=False)
 def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, stack: bool = False,
-           max_hits: int = 0, where: str = '', collect: str = '', capture: str = '') -> str:
+           max_hits: int = 0, where: str = '', collect: str = '', capture: str = '', log: str = '') -> str:
     """Hardware breakpoint that logs and continues (max 4). kind: write / access (data, size 1/2/4/8)
     or execute (code). Hits are grouped by instruction with registers of the first and last hit.
     stack=True also logs the 6 qwords at RSP as module+offset where they point into code (callers; [RSP]
@@ -420,15 +420,19 @@ def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, sta
     (==, !=, <, >, <=, >=; < and > unsigned). Skipped hits are counted apart and don't use up max_hits.
     collect: comma-separated operands whose distinct values are counted per instruction, e.g. 'RAX, [RSP]'.
     capture: comma-separated operands shown with the first and last hit; memory up to 256 bytes is dumped
-    in hex, e.g. '[RBP+0x460], [RSI]:0x40'."""
+    in hex, e.g. '[RBP+0x460], [RSI]:0x40'.
+    log: comma-separated operands recorded as one row per hit, in hit order (up to 20000 rows), after the ms
+    since the breakpoint was set, e.g. 'EAX, R14, [R14+0x30]' (log RSP to tell threads apart); bp_hits(log_file=...) writes them."""
     return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger, stack=stack, max_hits=max_hits,
-                where=where, collect=collect, capture=capture)
+                where=where, collect=collect, capture=capture, log=log)
 
 
 @mcp.tool(structured_output=False)
-def bp_hits(addr: str = '', clear: bool = False) -> str:
-    """Show what the breakpoints caught so far (all, or one address). clear=True also removes them."""
-    out = call('bp_hits', addr=A(addr) if addr else '')
+def bp_hits(addr: str = '', clear: bool = False, log_file: str = '') -> str:
+    """Show what the breakpoints caught so far (all, or one address). clear=True also removes them.
+    log_file: write the rows of breakpoints set with log= there (tab-separated, header first; with several
+    breakpoints, one file each: the address is added to the name); otherwise the first 20 rows are shown."""
+    out = call('bp_hits', addr=A(addr) if addr else '', log_file=log_file)
     if clear:
         call('bp_clear', addr=A(addr) if addr else '')
     return out

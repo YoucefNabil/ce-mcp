@@ -395,6 +395,7 @@ end
 
 local COLLECT_MAX = 32  -- distinct values kept per collected operand and instruction
 local LOG_MAX = 20000   -- rows kept per breakpoint with log=
+local log_seq = 0       -- hits logged by any breakpoint: orders rows across breakpoints (hits are handled one at a time)
 
 local function tally(h, rec)
   h.col = h.col or {}
@@ -441,7 +442,8 @@ local function on_hit(a, rec, trig)
     if #rec.collect > 0 then tally(h, rec) end
   end
   if #rec.log > 0 and #rec.rows < LOG_MAX then
-    local row = { tostring(getTickCount() - rec.t0) }
+    log_seq = log_seq + 1
+    local row = { tostring(getTickCount() - rec.t0), tostring(log_seq) }
     for i, op in ipairs(rec.log) do row[i + 1] = show(value(op)) end
     rec.rows[#rec.rows + 1] = table.concat(row, '\t')
   end
@@ -465,6 +467,18 @@ function cmd.bp_set(r)
                 where = conditions(r.where), collect = operands(r.collect, 8), capture = operands(r.capture, 256),
                 log = operands(r.log, 8), rows = {}, t0 = getTickCount() }
   if not debug_isDebugging() then
+    -- The VEH debugger's dll stays in the game after its CE is gone (killed by restart(), crashed). Starting it
+    -- again runs its InitializeVEH a second time, which in Skyrim with CrashLogger deadlocked: the init thread held
+    -- the dll's handler lock while waiting in CrashLogger's exception handler, game threads queued behind it, and
+    -- CE sat on "The VEH dll seems to have failed to load". Only a restart of the game clears it.
+    if (tonumber(r.debugger) or 0) ~= 1 then
+      for _, m in ipairs(enumModules() or {}) do
+        if m.Name:lower():find('^vehdebug%-') then
+          fail('the VEH debugger of an earlier Cheat Engine is still in this process (' .. m.Name .. '); starting it '
+            .. 'again can hang the game. Restart the game, or pass debugger=1 (Windows debugger: the game closes with CE)')
+        end
+      end
+    end
     debugProcess(tonumber(r.debugger) or 0)
     if not debug_isDebugging() then fail('could not start the debugger') end
   end
@@ -507,7 +521,8 @@ end
 
 local function log_text(a, rec, file, several)
   local head = { 'ms' }
-  for i, op in ipairs(rec.log) do head[i + 1] = op.text end
+  head[2] = 'seq'
+  for i, op in ipairs(rec.log) do head[i + 2] = op.text end
   local s = string.format('log: %d row(s)%s', #rec.rows, #rec.rows >= LOG_MAX and ' (full)' or '')
   if file and file ~= '' then
     if several then
@@ -648,6 +663,31 @@ end
 
 local busy = false
 
+-- A dialog CE opens during a request (a failed debugger start, a warning) sits on ce-mcp's hidden desktop where
+-- nobody can click it, and CE never returns: it is closed (Cancel) and named in the answer instead.
+local dialogs = {}
+if PARENT then
+  registerFormAddNotification(function(f)
+    if not busy or f == MainForm then return end
+    local t = createTimer(nil, false)
+    t.Interval = 200
+    t.OnTimer = function()
+      if not f.Visible then return end
+      t.destroy()
+      local texts = {}
+      for i = 0, f.ComponentCount - 1 do
+        local c = f.Component[i]
+        local ok, cap = pcall(function() return c.Caption end)
+        if ok and cap and cap ~= '' and not c.ClassName:find('Button') then texts[#texts + 1] = cap end
+      end
+      dialogs[#dialogs + 1] = string.format("'%s'%s", f.Caption, #texts > 0 and (': ' .. table.concat(texts, ' / ')) or '')
+      f.ModalResult = mrCancel
+      if f.Visible then pcall(function() f.close() end) end
+    end
+    t.Enabled = true
+  end)
+end
+
 local function poll()
   if busy then return end
   local f = io.open(REQ, 'rb')
@@ -661,9 +701,12 @@ local function poll()
   local fn = cmd[r.cmd or '']
   if not fn then respond(id, false, 'unknown command: ' .. tostring(r.cmd)) return end
   busy = true
+  dialogs = {}
   local ok, res = pcall(fn, r)
   busy = false
-  respond(id, ok, tostring(res))
+  res = tostring(res)
+  if #dialogs > 0 then res = res .. '\n(Cheat Engine showed a dialog, closed with Cancel: ' .. table.concat(dialogs, '; ') .. ')' end
+  respond(id, ok, res)
 end
 
 local timer = createTimer(nil, false)

@@ -413,7 +413,8 @@ def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, sta
     is the return address only at a function's first instruction). max_hits > 0 stops the breakpoint
     after that many hits and keeps what it caught, for addresses hit every frame (each hit slows the
     game). debugger: 2 = VEH (default; the game survives CE closing), 1 = Windows, 0 = CE's setting.
-    Only used when the debugger is not running yet.
+    Only used when the debugger is not running yet. The VEH debugger starts once per game process: after the
+    CE that started it is gone (restart(), crash) it is refused until the game restarts (a second start hung Skyrim).
     Operands below: a number, a register (RAX..R15, RIP; in a 32-bit target EAX..ESP, EIP, and the R names
     map to them) or memory [REG], [REG+0x10], [REG-8], [0x1234] with an optional :size in bytes (default 8,
     little-endian), all read at the moment of the hit. stack= reads dwords at ESP in a 32-bit target.
@@ -423,7 +424,7 @@ def bp_set(addr: str, kind: str = 'write', size: int = 4, debugger: int = 2, sta
     capture: comma-separated operands shown with the first and last hit; memory up to 256 bytes is dumped
     in hex, e.g. '[RBP+0x460], [RSI]:0x40'.
     log: comma-separated operands recorded as one row per hit, in hit order (up to 20000 rows), after the ms
-    since the breakpoint was set, e.g. 'EAX, R14, [R14+0x30]' (log RSP to tell threads apart); bp_hits(log_file=...) writes them."""
+    since the breakpoint was set and seq, a hit number shared by all breakpoints (merge several logs on it), e.g. 'EAX, R14, [R14+0x30]' (log RSP to tell threads apart); bp_hits(log_file=...) writes them."""
     return call('bp_set', addr=A(addr), kind=kind, size=size, debugger=debugger, stack=stack, max_hits=max_hits,
                 where=where, collect=collect, capture=capture, log=log)
 
@@ -490,7 +491,8 @@ def lua(code: str, timeout: float = 10) -> str:
 def restart() -> str:
     """Kill the Cheat Engine that ce-mcp started (when it stops answering) and start a fresh one, attached
     to the same process if it is still running. Its breakpoints are removed first if it still answers;
-    scans, aa scripts and Lua globals do not carry over."""
+    scans, aa scripts and Lua globals do not carry over. If the old one had the VEH debugger running, the new one
+    can't start it again in that process (bp_set says so): breakpoints need a game restart after that."""
     if SHARED:
         raise RuntimeError('ce-mcp uses a Cheat Engine started by hand (the enabled file): restart that one')
     with _lock:

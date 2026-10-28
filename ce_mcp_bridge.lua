@@ -444,7 +444,7 @@ local function on_hit(a, rec, trig)
   if #rec.log > 0 and #rec.rows < LOG_MAX then
     log_seq = log_seq + 1
     local row = { tostring(getTickCount() - rec.t0), tostring(log_seq) }
-    for i, op in ipairs(rec.log) do row[i + 1] = show(value(op)) end
+    for i, op in ipairs(rec.log) do row[i + 2] = show(value(op)) end
     rec.rows[#rec.rows + 1] = table.concat(row, '\t')
   end
   if rec.max > 0 and rec.total >= rec.max then

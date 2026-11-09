@@ -181,8 +181,34 @@ def online():
               lambda o: 'timed out' in o)
         check('CE fine after the timeout, print restored', lambda: c.lua('print("x")'), lambda o: o == 'x')
 
-        check('bp with stack', lambda: (c.bp_set(addr, stack=True), time.sleep(2.5), c.bp_hits(addr, clear=True))[2],
-              lambda o: 'stack: ' in o and '+' in o.split('stack: ')[1].split('\n')[0])
+        check('lua helper name', lambda: c.lua('return name("python.exe+10")'),
+              lambda o: o.endswith('(python.exe+10)'))
+        check('lua helper dis', lambda: c.lua('return dis("python.exe+1000", 3)'),
+              lambda o: o.count(NL) == 2 and o.startswith('python.exe+1000  '))
+        # the target's ctypes object points at its value, so something holds the address
+        check('lua helper refs', lambda: c.lua(f'local r = refs({addr}) return #r, name(r[1])'),
+              lambda o: int(o.split()[0]) >= 1)
+        check('lua helpers survive being overwritten', lambda: (c.lua('name = 5'), c.lua('return name(16)'))[1],
+              lambda o: o == '10')
+
+        check('bp with stack lists callers', lambda: (c.bp_set(addr, stack=True),
+                                                      c.bp_hits(addr, clear=True, wait=2.5))[1],
+              lambda o: 'callers: +' in o and '+' in o.split('callers: +')[1].split(NL)[0])
+        check('last hit shows only what changed', lambda: (c.bp_set(addr), c.bp_hits(addr, clear=True, wait=3.5))[1],
+              lambda o: len(o.split('last (what changed): ')[1].split(NL)[0])
+              < len(o.split('first: ')[1].split(NL)[0]))
+        t0 = time.time()
+        check('bp_hits wait returns at max_hits', lambda: (c.bp_set(addr, max_hits=1),
+                                                           c.bp_hits(addr, clear=True, wait=30))[1],
+              lambda o: ' 1 hit(s)' in o and time.time() - t0 < 5)
+        t1 = time.time()
+        check('find_writers returns at max_hits', lambda: c.find_writers(addr, 30, max_hits=1),
+              lambda o: ' 1 hit(s)' in o and time.time() - t1 < 5)
+        check('bp where on a sum of registers', lambda: (c.bp_set(addr, where='[RSP+RAX-RAX+0]:1 >= 0', max_hits=1),
+                                                         c.bp_hits(addr, clear=True, wait=5))[1],
+              lambda o: ' 1 hit(s)' in o and 'skipped' not in o)
+        check('bp bad memory operand is refused', lambda: c.bp_set(addr, where='[RAX++8] == 0'),
+              lambda o: 'bad memory operand' in o)
         check('bp max_hits', lambda: (c.bp_set(addr, max_hits=2), time.sleep(4), c.bp_hits(addr))[2],
               lambda o: ' 2 hit(s)' in o and 'stopped at max_hits' in o)
         check('stopped bp frees its slot', lambda: [c.bp_set(hex(base + 8 + 8 * i)) for i in range(4)][-1],
@@ -206,7 +232,7 @@ def online():
         check('bp log records rows in order', lambda: (c.bp_set(addr, log=f'RIP, [{addr}]:4'), time.sleep(3.5),
                                                        c.bp_hits(addr, clear=True, log_file=log_file))[2],
               lambda o: 'written to' in o and open(log_file).read().count(NL) >= 3
-              and open(log_file).readline().startswith('ms\tRIP'))
+              and open(log_file).readline().startswith('ms\tseq\tRIP'))
         check('bp bad operand is refused', lambda: c.bp_set(addr, where='RAX=1'), lambda o: 'bad condition' in o)
         check('bp bad size is refused', lambda: c.bp_set(addr, collect='[RAX]:16'), lambda o: 'bad size' in o)
         check('no bp left after refusals', c.bp_clear, lambda o: 'removed 0' in o)
@@ -278,7 +304,7 @@ def online32():
               lambda o: 'EAX=' in o and 'ESP=' in o and 'RAX=' not in o)
         check('32-bit bp with stack', lambda: (c.bp_set(addr, stack=True, max_hits=1), time.sleep(2.5),
                                                 c.bp_hits(addr, clear=True))[2],
-              lambda o: 'stack: ' in o and 'target32.exe+' in o.split('stack: ')[1].split(NL)[0])
+              lambda o: 'callers: +' in o and 'target32.exe+' in o.split('callers: ')[1].split(NL)[0])
         check('32-bit where on EIP and memory', lambda: (c.bp_set(addr, where=f'EIP != 0 && [{addr}]:4 != 0',
                                                                   max_hits=2), time.sleep(3.5),
                                                          c.bp_hits(addr, clear=True))[2],
@@ -294,7 +320,7 @@ def online32():
         check('32-bit bp log', lambda: (c.bp_set(addr, log=f'EIP, ESP, [{addr}]:4'), time.sleep(3.5),
                                         c.bp_hits(addr, clear=True, log_file=log_file))[2],
               lambda o: 'written to' in o and open(log_file).read().count(NL) >= 3
-              and open(log_file).readline().startswith('ms\tEIP\tESP'))
+              and open(log_file).readline().startswith('ms\tseq\tEIP\tESP'))
         check('no bp left (32-bit)', c.bp_clear, lambda o: 'removed 0' in o)
     finally:
         tgt.kill()

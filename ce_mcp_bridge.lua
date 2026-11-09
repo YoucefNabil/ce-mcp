@@ -12,7 +12,7 @@
 -- When CE is started by hand, the bridge polls only if %LOCALAPPDATA%\ce-mcp\enabled exists; the "ce-mcp"
 -- main menu toggles it. Lua inside auto assembler scripts is refused (see the README's Safety section).
 
-local VERSION = 5  -- must match BRIDGE_VERSION in ce_mcp.py
+local VERSION = 6  -- must match BRIDGE_VERSION in ce_mcp.py
 local PARENT = tonumber(os.getenv('CE_MCP_PARENT') or '')  -- set when ce-mcp started this CE
 local ALIVE = os.getenv('CE_MCP_ALIVE')
 local DIR = os.getenv('LOCALAPPDATA') .. '\\ce-mcp'
@@ -43,6 +43,24 @@ local function name(a)
   local n = getNameFromAddress(a)
   if n and n:find('+', 1, true) then return string.format('%X (%s)', a, n) end
   return string.format('%X', a)
+end
+
+-- `count` instructions from `target`, starting `before` instructions earlier
+local function code_lines(target, count, before, with_bytes)
+  local a, out = target, {}
+  for _ = 1, before do a = getPreviousOpcode(a) end
+  for _ = 1, math.min(count, 200) do
+    local d = disassemble(a)
+    local bytes, op = d:match('^.- %- (.-) %- (.*)$')
+    if with_bytes then
+      out[#out + 1] = string.format('%s %-30s %-24s %s', a == target and '>' or ' ', getNameFromAddress(a),
+        bytes or '', op or d)
+    else
+      out[#out + 1] = getNameFromAddress(a) .. '  ' .. (op or d)
+    end
+    a = a + math.max(getInstructionSize(a) or 1, 1)
+  end
+  return table.concat(out, '\n')
 end
 
 local cmd = {}
@@ -273,8 +291,9 @@ local function regval(n)
   return _G[TO32[n] or n]
 end
 
--- An operand of where/collect/capture: a number, a register, or memory [REG], [REG+off], [REG-off] or
--- [address], with an optional :size in bytes (default 8, read little-endian; capture dumps longer ones).
+-- An operand of where/collect/capture/log: a number, a register, or memory at a sum of registers and numbers
+-- ([REG], [REG+0x10], [RBX+R11-8], [0x1234]), with an optional :size in bytes (default 8, read little-endian;
+-- capture dumps longer ones).
 local function operand(text, maxsize)
   local s = text:gsub('%s', '')
   local inner, sz = s:match('^%[(.-)%]:?(%w*)$')
@@ -289,15 +308,17 @@ local function operand(text, maxsize)
   if math.type(size) ~= 'integer' or size < 1 or size > maxsize then
     fail(string.format('bad size in "%s" (1..%d bytes)', text, maxsize))
   end
-  local base, sign, off = inner:upper():match('^(%w+)([%+%-]?)(%w*)$')
-  if not base or (sign == '') ~= (off == '') then fail('bad memory operand "' .. text .. '"') end
-  local o = { text = s, size = size, off = 0 }
-  if REGSET[base] then o.reg = base else o.addr = tonumber(base) end
-  if off ~= '' then o.off = tonumber(off) end
-  if (not o.reg and math.type(o.addr) ~= 'integer') or math.type(o.off) ~= 'integer' then
-    fail('bad memory operand "' .. text .. '"')
+  local o, bad = { text = s, size = size, terms = {} }, false
+  local rest = inner:upper():gsub('([%+%-]?)([^%+%-]+)', function(sign, term)
+    local t = { neg = sign == '-' }
+    if REGSET[term] then t.reg = term else t.num = tonumber(term) end
+    if not t.reg and math.type(t.num) ~= 'integer' then bad = true end
+    o.terms[#o.terms + 1] = t
+    return ''
+  end)
+  if bad or rest ~= '' or #o.terms == 0 then
+    fail('bad memory operand "' .. text .. '": registers and numbers (hex with 0x) joined by + or -')
   end
-  if sign == '-' then o.off = -o.off end
   return o
 end
 
@@ -313,10 +334,14 @@ end
 -- than 8 bytes, or nil when the memory can't be read.
 local function value(o)
   if o.num then return o.num end
-  if not o.size then return regval(o.reg) end
-  local base = o.reg and regval(o.reg) or o.addr
-  if not base then return nil end
-  local b = readBytes(base + o.off, o.size, true)
+  if not o.terms then return regval(o.reg) end
+  local a = 0
+  for _, t in ipairs(o.terms) do
+    local v = t.num or regval(t.reg)
+    if not v then return nil end
+    a = t.neg and a - v or a + v
+  end
+  local b = readBytes(a, o.size, true)
   if not b or #b < o.size then return nil end
   if o.size > 8 then return hexbytes(b, ' ') end
   local v = 0
@@ -367,30 +392,71 @@ local function holds(list)
   return true
 end
 
-local function regs(rec)
-  local o = {}
-  local is64 = targetIs64Bit()
-  for i, n in ipairs(is64 and REGS64 or REGS32) do
-    local v = _G[n]
-    o[i] = string.format('%s=%X', n, v or 0)
-  end
-  local s = table.concat(o, ' ')
+local STACK_BYTES = 0x400  -- stack kept per hit with stack=true; the return addresses in it are picked out on report
+local CALLERS_MAX = 10
+
+-- What a hit looked like (in a breakpoint handler): raw values only, the text is made when reporting.
+local function snapshot(rec)
+  local s = { regs = {} }
+  for i, n in ipairs(rec.is64 and REGS64 or REGS32) do s.regs[i] = _G[n] or 0 end
   if #rec.capture > 0 then
     local c = {}
     for i, op in ipairs(rec.capture) do c[i] = op.text .. '=' .. show(value(op)) end
-    s = s .. '\n    capture: ' .. table.concat(c, '  ')
+    s.capture = table.concat(c, '  ')
   end
   if rec.stack then
-    -- [RSP] is the return address only at a function's first instruction; deeper slots often hold callers
-    local q = {}
-    local sp, w = regval('RSP'), is64 and 8 or 4
-    for i = 0, 5 do
-      local v = sp and (is64 and readQword(sp + w * i) or readInteger(sp + w * i))
-      q[#q + 1] = v and name(v) or '?'
-    end
-    s = s .. '\n    stack: ' .. table.concat(q, ' ')
+    local sp = regval('RSP')
+    s.stack = sp and (readBytes(sp, STACK_BYTES, true) or readBytes(sp, 0x40, true)) or {}
   end
   return s
+end
+
+-- True when the bytes before `a` are a call instruction, so `a` on a stack is a return address.
+local function after_call(a)
+  local b = readBytes(a - 7, 7, true)   -- b[8 - k] is the byte k before a
+  if not b or #b < 7 then return false end
+  if b[3] == 0xE8 then return true end  -- call rel32
+  for _, k in ipairs({ 2, 3, 4, 6, 7 }) do  -- call r/m (FF /2) that is k bytes long
+    local modrm = b[9 - k]
+    if b[8 - k] == 0xFF and (modrm >> 3) & 7 == 2 then
+      local mod, rm = modrm >> 6, modrm & 7
+      local sib = mod ~= 3 and rm == 4
+      local disp32 = mod == 2 or (mod == 0 and (rm == 5 or (sib and k > 2 and b[10 - k] & 7 == 5)))
+      if 2 + (sib and 1 or 0) + (mod == 1 and 1 or 0) + (disp32 and 4 or 0) == k then return true end
+    end
+  end
+  return false
+end
+
+-- The return addresses in a stack snapshot, nearest first, as `+slot offset  module+offset`. Works without frame
+-- pointers and in code no module owns (JIT); a stale slot that still holds an old return address shows up too.
+local function callers(stack, is64)
+  local w, out = is64 and 8 or 4, {}
+  for o = 0, #stack - w, w do
+    local v = 0
+    for i = w, 1, -1 do v = (v << 8) | stack[o + i] end
+    if v > 0x10000 and after_call(v) then
+      out[#out + 1] = string.format('+%X %s', o, getNameFromAddress(v))
+      if #out >= CALLERS_MAX then break end
+    end
+  end
+  if #out == 0 then return string.format('none in the %d bytes at the stack pointer', #stack) end
+  return table.concat(out, ', ')
+end
+
+-- A snapshot as text. With `first` (the instruction's first hit) only what differs from it is shown.
+local function snap_text(rec, s, first)
+  local o = {}
+  for i, n in ipairs(rec.is64 and REGS64 or REGS32) do
+    if not first or s.regs[i] ~= first.regs[i] then o[#o + 1] = string.format('%s=%X', n, s.regs[i]) end
+  end
+  local text = #o > 0 and table.concat(o, ' ') or 'same registers'
+  if s.capture and not (first and first.capture == s.capture) then text = text .. '\n    capture: ' .. s.capture end
+  if s.stack then
+    s.callers = s.callers or callers(s.stack, rec.is64)
+    if not (first and first.callers == s.callers) then text = text .. '\n    callers: ' .. s.callers end
+  end
+  return text
 end
 
 local COLLECT_MAX = 32  -- distinct values kept per collected operand and instruction
@@ -428,13 +494,13 @@ local function on_hit(a, rec, trig)
   rec.total = rec.total + 1
   local h = rec.hits[ip]
   if not h and #rec.order < 64 then
-    h = { n = 0, first = regs(rec) }
+    h = { n = 0, first = snapshot(rec) }
     rec.hits[ip] = h
     rec.order[#rec.order + 1] = ip
   end
   if h then
     h.n = h.n + 1
-    if h.n > 1 then h.last = regs(rec) end
+    if h.n > 1 then h.last = snapshot(rec) end
     if trig ~= bptExecute then
       local v = readBytes(a, rec.size, true)
       h.value = v and hexbytes(v, ' ') or '?'
@@ -463,7 +529,8 @@ function cmd.bp_set(r)
   if bps[a] then fail(string.format('breakpoint already set at %X (bp_clear first)', a)) end
   if active_bps() >= 4 then fail('all 4 hardware breakpoints are in use (bp_clear one first)') end
   local rec = { kind = kind, size = size, total = 0, skipped = 0, hits = {}, order = {},
-                pid = getOpenedProcessID(), stack = r.stack == '1', max = tonumber(r.max_hits) or 0,
+                pid = getOpenedProcessID(), is64 = targetIs64Bit(), stack = r.stack == '1',
+                max = tonumber(r.max_hits) or 0,
                 where = conditions(r.where), collect = operands(r.collect, 8), capture = operands(r.capture, 256),
                 log = operands(r.log, 8), rows = {}, t0 = getTickCount() }
   if not debug_isDebugging() then
@@ -513,8 +580,8 @@ local function hits_text(a, rec)
       out[#out + 1] = string.format('  %s: %s%s', rec.collect[i].text, table.concat(vs, ', '),
         t.other > 0 and string.format(' (+%d hits with other values)', t.other) or '')
     end
-    out[#out + 1] = '  first: ' .. h.first
-    if h.last then out[#out + 1] = '  last:  ' .. h.last end
+    out[#out + 1] = '  first: ' .. snap_text(rec, h.first)
+    if h.last then out[#out + 1] = '  last (what changed): ' .. snap_text(rec, h.last, h.first) end
   end
   return table.concat(out, '\n')
 end
@@ -541,17 +608,32 @@ local function log_text(a, rec, file, several)
   return table.concat(out, '\n')
 end
 
+-- The breakpoints a request is about: the one at r.addr, or all of them.
+local function chosen(r)
+  if not r.addr or r.addr == '' then return bps end
+  local a = addr(r.addr)
+  return { [a] = bps[a] }
+end
+
+-- How many are still collecting (not stopped at max_hits): bp_hits(wait=) returns early at 0.
+function cmd.bp_pending(r)
+  need_process()
+  local n = 0
+  for _, rec in pairs(chosen(r)) do
+    if not rec.stopped then n = n + 1 end
+  end
+  return tostring(n)
+end
+
 function cmd.bp_hits(r)
   local out, n = {}, 0
-  for a, rec in pairs(bps) do
-    if (not r.addr or r.addr == '' or a == addr(r.addr)) and #rec.log > 0 then n = n + 1 end
+  for _, rec in pairs(chosen(r)) do
+    if #rec.log > 0 then n = n + 1 end
   end
-  for a, rec in pairs(bps) do
-    if not r.addr or r.addr == '' or a == addr(r.addr) then
-      local s = hits_text(a, rec)
-      if #rec.log > 0 then s = s .. '\n' .. log_text(a, rec, r.log_file, n > 1) end
-      out[#out + 1] = s
-    end
+  for a, rec in pairs(chosen(r)) do
+    local s = hits_text(a, rec)
+    if #rec.log > 0 then s = s .. '\n' .. log_text(a, rec, r.log_file, n > 1) end
+    out[#out + 1] = s
   end
   if #out == 0 then return 'no breakpoints set by ce-mcp' end
   return table.concat(out, '\n\n')
@@ -559,12 +641,10 @@ end
 
 function cmd.bp_clear(r)
   local n = 0
-  for a in pairs(bps) do
-    if not r.addr or r.addr == '' or a == addr(r.addr) then
-      if not bps[a].stopped then debug_removeBreakpoint(a) end
-      bps[a] = nil
-      n = n + 1
-    end
+  for a, rec in pairs(chosen(r)) do
+    if not rec.stopped then debug_removeBreakpoint(a) end
+    bps[a] = nil
+    n = n + 1
   end
   return string.format('removed %d breakpoint(s)', n)
 end
@@ -573,18 +653,7 @@ end
 
 function cmd.disasm(r)
   need_process()
-  local target = addr(r.addr)
-  local a = target
-  for _ = 1, tonumber(r.before) or 0 do a = getPreviousOpcode(a) end
-  local out = {}
-  for _ = 1, math.min(tonumber(r.count) or 12, 200) do
-    local d = disassemble(a)
-    local bytes, op = d:match('^.- %- (.-) %- (.*)$')
-    out[#out + 1] = string.format('%s %-30s %-24s %s', a == target and '>' or ' ', getNameFromAddress(a),
-      bytes or '', op or d)
-    a = a + math.max(getInstructionSize(a) or 1, 1)
-  end
-  return table.concat(out, '\n')
+  return code_lines(addr(r.addr), tonumber(r.count) or 12, tonumber(r.before) or 0, true)
 end
 
 local scripts = {}  -- enabled: [name] = {script, info}
@@ -618,6 +687,37 @@ end
 
 local LUA_MAX = 20000  -- characters of output
 
+-- Globals for lua() code: what its callers otherwise spell out again in nearly every call. Addresses may be
+-- numbers or anything CE resolves ('Game.exe+1234').
+local function A(x) return math.type(x) == 'integer' and x or addr(tostring(x)) end
+
+local HELPERS = {
+  -- 'HEX (module+offset)', or just the hex outside modules
+  name = function(a) return name(A(a)) end,
+  -- `n` instructions at `a` as text, one `module+offset  instruction` per line
+  dis = function(a, n) return code_lines(A(a), n or 12, 0, false) end,
+  -- Addresses holding `value` as a pointer-sized integer (who points at this), as a list of numbers.
+  -- lo/hi limit the range; align defaults to the pointer size (1 finds operands inside 32-bit code).
+  refs = function(value, lo, hi, align)
+    need_process()
+    local w = targetIs64Bit() and 8 or 4
+    align = align or w
+    local ms = createMemScan()
+    ms.firstScan(soExactValue, w == 8 and vtQword or vtDword, rtRounded, string.format('%X', A(value)), '',
+      lo and A(lo) or 0, hi and A(hi) or 0x7FFFFFFFFFFFFFFF, '*W*X*C', align == 1 and fsmNotAligned or fsmAligned,
+      tostring(align), true, false, false, false)
+    ms.waitTillDone()
+    local fl = createFoundList(ms)
+    fl.initialize()
+    local out = {}
+    for i = 0, math.min(fl.Count, 10000) - 1 do out[i + 1] = tonumber(fl.Address[i], 16) end
+    fl.deinitialize()
+    fl.destroy()
+    ms.destroy()
+    return out
+  end,
+}
+
 -- Runs `code` with CE's whole Lua API; returns what it printed, then its return values.
 -- Only in the CE ce-mcp started: that one is not elevated, so this gives no more than the caller already has.
 function cmd.lua(r)
@@ -634,6 +734,7 @@ function cmd.lua(r)
   local deadline = getTickCount() + (tonumber(r.limit) or 10) * 1000
   local saved_print = print
   print = emit
+  for k, f in pairs(HELPERS) do _G[k] = f end  -- again each call: earlier code may have reused the names
   debug.sethook(function() if getTickCount() > deadline then error('lua() timed out', 0) end end, '', 10000)
   local res = table.pack(pcall(chunk))
   debug.sethook()
